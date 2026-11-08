@@ -27,11 +27,29 @@ constexpr int kFlamKnob = 28;
 constexpr int kLabelH = 14;
 constexpr int kCtrlRow = kLabelH + kKnobSize + 4;
 constexpr int kSlot0X = 148;
-constexpr int kSlotAreaW = 876;
 const juce::Rectangle<int> kMachine808 { 8, 64, kEditorW - 16, 270 };
 const juce::Rectangle<int> kMachine909 { 8, 342, kEditorW - 16, 290 };
-constexpr int k808SlotW = kSlotAreaW / 12;
-constexpr int k909SlotW[] = { 56, 92, 92, 88, 88, 88, 56, 56, 56, 68, 68, 68 };
+constexpr int k909OuterPad = 16;
+constexpr int k909PairHalf = 40;
+constexpr int k909InnerPad = (k909PairHalf - kKnobSize) / 2;
+constexpr int k909PairPad = k909OuterPad - k909InnerPad;
+constexpr int k909SplitW = k909PairPad * 2 + k909PairHalf * 2;
+constexpr int k909CentreW = k909OuterPad * 2 + kKnobSize;
+constexpr int k909HatW = k909PairHalf + k909OuterPad - k909InnerPad;
+constexpr int k909SlotW[] = {
+    k909CentreW, k909SplitW, k909SplitW, k909SplitW, k909SplitW, k909SplitW,
+    k909CentreW, k909CentreW, k909HatW, k909HatW, k909CentreW, k909CentreW
+};
+constexpr int k909SlotAreaW = k909CentreW * 5 + k909SplitW * 5 + k909HatW * 2;
+constexpr int k808BaseW = k909SlotAreaW / 12;
+constexpr int k808SlotW[] = {
+    k808BaseW + 1, k808BaseW + 1, k808BaseW,
+    k808BaseW + 1, k808BaseW + 1, k808BaseW,
+    k808BaseW + 1, k808BaseW + 1, k808BaseW,
+    k808BaseW + 1, k808BaseW + 1, k808BaseW
+};
+static_assert (k909SlotAreaW == 812);
+static_assert (k808BaseW * 12 + 8 == k909SlotAreaW);
 constexpr int kSwitch808[] = { 11, 14, 17, 19, 21 };
 const char* k808Legend[] = { "AC", "BD", "SD", "LT", "MT", "HT", "RS", "CP", "CB", "CY", "OH", "CH" };
 const char* k909Legend[] = { "AC", "BD", "SD", "LT", "MT", "HT", "RS", "CP", "CH", "OH", "CC", "RC" };
@@ -49,13 +67,16 @@ const char* k909KnobLabel[ORB_MODLOADER_P909] = {
 
 enum class SlotSide { Centre, Left, Right };
 
-int slot909X (int col)
+int slotX (const int* widths, int col)
 {
     int x = kSlot0X;
     for (int i = 0; i < col; ++i)
-        x += k909SlotW[i];
+        x += widths[i];
     return x;
 }
+
+int slot808X (int col) { return slotX (k808SlotW, col); }
+int slot909X (int col) { return slotX (k909SlotW, col); }
 
 int switchIndex (int ctrl)
 {
@@ -1258,23 +1279,25 @@ void ModloaderEditor::paint (juce::Graphics& g)
         g.fillRect (r.getX() + 3.0f, r.getY() + 10.0f, 2.0f, r.getHeight() - 20.0f);
     }
 
-    auto paintSlots = [&] (const std::array<juce::Rectangle<int>, 12>& slots)
+    auto paintSlots = [&] (const std::array<juce::Rectangle<int>, 12>& slots, bool joinHats)
     {
         for (int i = 0; i < 12; ++i)
         {
             auto r = slots[(size_t) i].toFloat();
             if (r.isEmpty())
                 continue;
-            g.setColour (i % 2 == 0 ? kSlotA : kSlotB);
+            const bool dark = joinHats && i >= 9 ? (i % 2 != 0) : (i % 2 == 0);
+            g.setColour (dark ? kSlotA : kSlotB);
             g.fillRect (r);
             g.setColour (kLine);
-            g.fillRect (r.getX(), r.getY() + 4.0f, 1.0f, r.getHeight() - 8.0f);
+            if (! (joinHats && i == 9))
+                g.fillRect (r.getX(), r.getY() + 4.0f, 1.0f, r.getHeight() - 8.0f);
             if (i == 11)
                 g.fillRect (r.getRight() - 1.0f, r.getY() + 4.0f, 1.0f, r.getHeight() - 8.0f);
         }
     };
-    paintSlots (slot808);
-    paintSlots (slot909);
+    paintSlots (slot808, false);
+    paintSlots (slot909, true);
 
     auto markDisabled = [&] (const juce::Label& legend, int bus)
     {
@@ -1390,18 +1413,19 @@ void ModloaderEditor::resized()
 
     auto place808Knob = [this, &placeLabeled] (int ctrl, int col, int row)
     {
-        const int x = kSlot0X + col * k808SlotW;
-        placeLabeled (k808[(size_t) ctrl], n808[(size_t) ctrl], x, y808 + row * kCtrlRow, k808SlotW);
+        const int x = slot808X (col);
+        placeLabeled (k808[(size_t) ctrl], n808[(size_t) ctrl], x, y808 + row * kCtrlRow, k808SlotW[col]);
     };
     auto place808Sw = [this] (int i, int col, int row)
     {
-        const int slotX = kSlot0X + col * k808SlotW;
+        const int slotLeft = slot808X (col);
+        const int slotW = k808SlotW[col];
         const int y = y808 + row * kCtrlRow + 6;
         constexpr int h = 16;
         auto& alt = sw808[(size_t) i];
         auto& def = sw808Def[(size_t) i];
         const int w = juce::jmax (toggleContentWidth (alt, h), toggleContentWidth (def, h));
-        const int x = slotX + (k808SlotW - w) / 2;
+        const int x = slotLeft + (slotW - w) / 2;
         alt.setBounds (x, y, w, h);
         def.setBounds (x, y + 16, w, h);
     };
@@ -1448,10 +1472,16 @@ void ModloaderEditor::resized()
         const int ledY = clusterY + stepH + ledGap;
         for (int i = 0; i < 12; ++i)
         {
-            const int x = is808 ? kSlot0X + i * k808SlotW : slot909X (i);
-            const int w = is808 ? k808SlotW : k909SlotW[i];
+            const int x = is808 ? slot808X (i) : slot909X (i);
+            const int w = is808 ? k808SlotW[i] : k909SlotW[i];
             slotRects[(size_t) i] = { x, y0 - 6, w, slotBottom - (y0 - 6) };
-            legends[(size_t) i].setBounds (x, legendY, w, legendH);
+            int lx = x, lw = w;
+            if (! is808 && (i == 8 || i == 9))
+            {
+                lw = k909PairHalf;
+                lx = i == 8 ? x + w - lw : x;
+            }
+            legends[(size_t) i].setBounds (lx, legendY, lw, legendH);
         }
         for (int i = 0; i < 16; ++i)
         {
@@ -1470,11 +1500,15 @@ void ModloaderEditor::resized()
         const int slotW = k909SlotW[col];
         const int y = y909 + row * kCtrlRow;
         int x = slotX, w = slotW;
-        if (side != SlotSide::Centre)
+        if (col == 8 || col == 9)
         {
-            constexpr int pad = 4;
-            w = (slotW - pad * 2) / 2;
-            x = side == SlotSide::Left ? slotX + pad : slotX + pad + w;
+            w = k909PairHalf;
+            x = col == 8 ? slotX + slotW - w : slotX;
+        }
+        else if (side != SlotSide::Centre)
+        {
+            w = (slotW - k909PairPad * 2) / 2;
+            x = side == SlotSide::Left ? slotX + k909PairPad : slotX + k909PairPad + w;
         }
         placeLabeled (k909[(size_t) ctrl], n909[(size_t) ctrl], x, y, w);
     };
