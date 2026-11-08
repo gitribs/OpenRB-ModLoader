@@ -59,6 +59,19 @@ public:
     /// Restore default parameters and empty patterns, as a newly created instance.
     void resetDevice();
 
+    /// Load a ReBirth 2.x `.rbs`: 808/909 knobs and all patterns. Returns false on error.
+    bool loadSongFile (const juce::File& file, juce::String& error);
+    /// Write a 4.2 `.rbs` with the current 808/909 knobs and patterns.
+    bool saveSongFile (const juce::File& file, juce::String& error);
+    /// Path of the last loaded or saved song; empty means unsaved.
+    juce::File currentSong() const { return songFile; }
+    /// Display name for the header: file stem, or "unsaved".
+    juce::String songDisplayName() const;
+    /// Mod named in the last loaded song (GLOB), empty if none.
+    juce::String loadedSongModName() const { return songModName; }
+    /// Load the scanned kit whose name matches `name` (case-insensitive). Returns the index, or -1.
+    int loadModByName (const juce::String& name);
+
     juce::AudioProcessorValueTreeState apvts;
     PatternClipboard patternClip;
     OrbModloader* engine() noexcept { return engine_.get(); }
@@ -85,7 +98,12 @@ private:
     void shiftFifo (juce::AudioBuffer<float>& fifo, int& fill, int used);
     int asInt (const juce::String& id, int fallback) const;
 
+    void applySongParams (const OrbModloaderSong& song);
+    void fillSongParams (OrbModloaderSong& song) const;
+
     std::unique_ptr<OrbModloader, EngineDeleter> engine_;
+    juce::File songFile;
+    juce::String songModName;
     double hostRate = 44100.0;
     bool exact44100 = true;
     int maxHostBlock = 0;

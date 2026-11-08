@@ -291,9 +291,9 @@ void IncDecArrowButton::mouseUp (const juce::MouseEvent& e)
         juce::Button::mouseUp (e);
 }
 
-SettingsButton::SettingsButton() : juce::Button ({}) {}
+HeaderIconButton::HeaderIconButton (Kind k) : juce::Button ({}), kind (k) {}
 
-void SettingsButton::setAttention (bool shouldAttention)
+void HeaderIconButton::setAttention (bool shouldAttention)
 {
     if (attention == shouldAttention)
         return;
@@ -301,7 +301,7 @@ void SettingsButton::setAttention (bool shouldAttention)
     repaint();
 }
 
-void SettingsButton::paintButton (juce::Graphics& g, bool highlighted, bool down)
+void HeaderIconButton::paintButton (juce::Graphics& g, bool highlighted, bool down)
 {
     auto r = getLocalBounds().toFloat().reduced (0.5f);
     g.setColour (kWell);
@@ -310,45 +310,75 @@ void SettingsButton::paintButton (juce::Graphics& g, bool highlighted, bool down
     g.setColour (lit ? kAmber : kLine);
     g.drawRoundedRectangle (r, 2.0f, 1.0f);
 
-    const auto c = r.getCentre();
-    const float radius = juce::jmin (r.getWidth(), r.getHeight()) * 0.28f;
-    const float inner = radius * 0.62f;
-    const float hole = radius * 0.32f;
-    constexpr int teeth = 8;
-    juce::Path gear;
-    for (int i = 0; i < teeth; ++i)
-    {
-        const float step = juce::MathConstants<float>::twoPi / (float) teeth;
-        const float a = (float) i * step - juce::MathConstants<float>::halfPi;
-        const float a0 = a - step * 0.16f;
-        const float a1 = a + step * 0.16f;
-        const float b0 = a + step * 0.34f;
-        const float b1 = a + step * 0.66f;
-        auto pt = [c] (float ang, float rad)
-        {
-            return juce::Point<float> (c.x + std::cos (ang) * rad, c.y + std::sin (ang) * rad);
-        };
-        if (i == 0)
-            gear.startNewSubPath (pt (a0, radius));
-        gear.lineTo (pt (a0, radius));
-        gear.lineTo (pt (a1, radius));
-        gear.lineTo (pt (b0, inner));
-        gear.lineTo (pt (b1, inner));
-    }
-    gear.closeSubPath();
-    gear.setUsingNonZeroWinding (false);
-    gear.addEllipse (c.x - hole, c.y - hole, hole * 2.0f, hole * 2.0f);
     g.setColour (down || attention ? kAmber : kText);
-    g.fillPath (gear);
+    const auto c = r.getCentre();
+
+    if (kind == Kind::Settings)
+    {
+        const float radius = juce::jmin (r.getWidth(), r.getHeight()) * 0.28f;
+        const float inner = radius * 0.62f;
+        const float hole = radius * 0.32f;
+        constexpr int teeth = 8;
+        juce::Path gear;
+        for (int i = 0; i < teeth; ++i)
+        {
+            const float step = juce::MathConstants<float>::twoPi / (float) teeth;
+            const float a = (float) i * step - juce::MathConstants<float>::halfPi;
+            const float a0 = a - step * 0.16f;
+            const float a1 = a + step * 0.16f;
+            const float b0 = a + step * 0.34f;
+            const float b1 = a + step * 0.66f;
+            auto pt = [c] (float ang, float rad)
+            {
+                return juce::Point<float> (c.x + std::cos (ang) * rad, c.y + std::sin (ang) * rad);
+            };
+            if (i == 0)
+                gear.startNewSubPath (pt (a0, radius));
+            gear.lineTo (pt (a0, radius));
+            gear.lineTo (pt (a1, radius));
+            gear.lineTo (pt (b0, inner));
+            gear.lineTo (pt (b1, inner));
+        }
+        gear.closeSubPath();
+        gear.setUsingNonZeroWinding (false);
+        gear.addEllipse (c.x - hole, c.y - hole, hole * 2.0f, hole * 2.0f);
+        g.fillPath (gear);
+        return;
+    }
+
+    if (kind == Kind::Open)
+    {
+        const float w = juce::jmin (r.getWidth(), r.getHeight()) * 0.52f;
+        const float h = w * 0.72f;
+        auto body = juce::Rectangle<float> (c.x - w * 0.5f, c.y - h * 0.28f, w, h * 0.78f);
+        auto tab = juce::Rectangle<float> (body.getX(), body.getY() - h * 0.28f, w * 0.42f, h * 0.36f);
+        juce::Path folder;
+        folder.addRoundedRectangle (tab, 1.4f);
+        folder.addRoundedRectangle (body, 1.6f);
+        g.fillPath (folder);
+        return;
+    }
+
+    const float w = juce::jmin (r.getWidth(), r.getHeight()) * 0.50f;
+    const float h = w * 1.05f;
+    auto disk = juce::Rectangle<float> (c.x - w * 0.5f, c.y - h * 0.5f, w, h);
+    juce::Path floppy;
+    floppy.addRoundedRectangle (disk, 1.4f);
+    g.fillPath (floppy);
+    g.setColour (kWell);
+    auto shutter = disk.removeFromTop (h * 0.34f).reduced (w * 0.16f, h * 0.06f);
+    g.fillRect (shutter);
+    auto label = disk.removeFromBottom (h * 0.28f).reduced (w * 0.14f, 0.0f);
+    g.fillRect (label);
 }
 
-void SettingsButton::mouseDown (const juce::MouseEvent& e)
+void HeaderIconButton::mouseDown (const juce::MouseEvent& e)
 {
     if (! e.mods.isPopupMenu())
         juce::Button::mouseDown (e);
 }
 
-void SettingsButton::mouseUp (const juce::MouseEvent& e)
+void HeaderIconButton::mouseUp (const juce::MouseEvent& e)
 {
     if (! e.mods.isPopupMenu())
         juce::Button::mouseUp (e);
@@ -910,6 +940,7 @@ ModloaderEditor::ModloaderEditor (ModloaderProcessor& p)
 
     addLabel (title, "OpenRB Modloader", kAmber, 18.0f);
     addLabel (modName, "Standard ReBirth", kText, 14.0f);
+    addLabel (songName, "unsaved", kMuted, 14.0f);
     addLabel (status, {}, kMuted, 12.0f);
     addLabel (shuffleN, "SHUFFLE", kMuted, 11.0f);
     shuffleN.setJustificationType (juce::Justification::centredRight);
@@ -919,14 +950,24 @@ ModloaderEditor::ModloaderEditor (ModloaderProcessor& p)
     modName.setColour (juce::Label::backgroundColourId, kWell);
     modName.setColour (juce::Label::outlineColourId, kLine);
     modName.setMouseCursor (juce::MouseCursor::PointingHandCursor);
+    songName.setJustificationType (juce::Justification::centredLeft);
+    songName.setColour (juce::Label::backgroundColourId, kWell);
+    songName.setColour (juce::Label::outlineColourId, kLine);
+    songName.setColour (juce::Label::textColourId, kMuted);
     status.setJustificationType (juce::Justification::centredLeft);
 
     addAndMakeVisible (modUp);
     addAndMakeVisible (modDown);
+    addAndMakeVisible (songOpenBtn);
+    addAndMakeVisible (songSaveBtn);
     addAndMakeVisible (settingsBtn);
+    songOpenBtn.setTooltip ("Open song");
+    songSaveBtn.setTooltip ("Save song");
     settingsBtn.setTooltip ("Settings");
     modDown.onClick = [this] { loadMod (-1); };
     modUp.onClick = [this] { loadMod (1); };
+    songOpenBtn.onClick = [this] { chooseSongOpen(); };
+    songSaveBtn.onClick = [this] { chooseSongSave(); };
     settingsBtn.onClick = [this] { toggleSettings(); };
 
     setupKnob (shuffle, false);
@@ -956,6 +997,7 @@ ModloaderEditor::ModloaderEditor (ModloaderProcessor& p)
     pat909.shownBank = currentPattern (1) / 8;
     refreshPatternHeader();
     refreshModLabel();
+    refreshSongLabel();
     refreshSplash();
     refreshSteps();
     resized();
@@ -1321,6 +1363,16 @@ void ModloaderEditor::refreshModLabel()
         modPicker->syncSelection (index);
 }
 
+void ModloaderEditor::refreshSongLabel()
+{
+    const auto name = proc.songDisplayName();
+    const bool unsaved = name == "unsaved";
+    songName.setText (name, juce::dontSendNotification);
+    songName.setColour (juce::Label::textColourId, unsaved ? kMuted : kText);
+    const auto path = proc.currentSong().getFullPathName();
+    songName.setTooltip (path);
+}
+
 void ModloaderEditor::refreshSplash()
 {
     splashImage = {};
@@ -1459,6 +1511,100 @@ void ModloaderEditor::applyPickedMod (const juce::File& f)
         showSettings (true);
     else if (settingsPanel != nullptr)
         settingsPanel->refresh();
+}
+
+void ModloaderEditor::showSongError (const juce::String& heading, const juce::String& message)
+{
+    juce::AlertWindow::showMessageBoxAsync (juce::AlertWindow::WarningIcon, heading, message);
+}
+
+void ModloaderEditor::finishSongLoad()
+{
+    const auto mod = proc.loadedSongModName();
+    if (mod.isNotEmpty() && proc.loadModByName (mod) < 0)
+        showSongError ("Mod not found",
+                       "This song uses the mod \"" + mod + "\", which was not in the Mods folder.");
+
+    pat808.shownBank = currentPattern (0) / 8;
+    pat909.shownBank = currentPattern (1) / 8;
+    refreshPatternHeader();
+    refreshSteps();
+    refreshSongLabel();
+    refreshModLabel();
+    refreshSplash();
+    refreshDisable();
+    sync808Radios();
+    if (statusNeedsDat())
+        showSettings (true);
+}
+
+void ModloaderEditor::applyOpenedSong (const juce::File& f)
+{
+    if (f.getFullPathName().isEmpty())
+        return;
+    juce::String error;
+    if (! proc.loadSongFile (f, error))
+    {
+        showSongError ("Could not open song", error);
+        refreshModLabel();
+        return;
+    }
+    finishSongLoad();
+}
+
+void ModloaderEditor::chooseSongOpen()
+{
+    hideModPicker();
+    if (fileChooserOpen)
+        return;
+    juce::File start = proc.currentSong();
+    if (! start.existsAsFile())
+        start = juce::File::getSpecialLocation (juce::File::userDocumentsDirectory);
+
+    fileChooserOpen = true;
+    chooser = std::make_unique<juce::FileChooser> (
+        "Open ReBirth song", start, "*.rbs;*.RBS");
+    chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+                          [this] (const juce::FileChooser& fc)
+                          {
+                              fileChooserOpen = false;
+                              applyOpenedSong (fc.getResult());
+                          });
+}
+
+void ModloaderEditor::chooseSongSave()
+{
+    hideModPicker();
+    if (fileChooserOpen)
+        return;
+    juce::File start = proc.currentSong();
+    if (start.getFullPathName().isEmpty())
+        start = juce::File::getSpecialLocation (juce::File::userDocumentsDirectory)
+                    .getChildFile ("Untitled.rbs");
+
+    fileChooserOpen = true;
+    chooser = std::make_unique<juce::FileChooser> (
+        "Save ReBirth song", start, "*.rbs;*.RBS");
+    chooser->launchAsync (juce::FileBrowserComponent::saveMode
+                              | juce::FileBrowserComponent::canSelectFiles
+                              | juce::FileBrowserComponent::warnAboutOverwriting,
+                          [this] (const juce::FileChooser& fc)
+                          {
+                              fileChooserOpen = false;
+                              auto f = fc.getResult();
+                              if (f.getFullPathName().isEmpty())
+                                  return;
+                              if (f.getFileExtension().isEmpty())
+                                  f = f.withFileExtension ("rbs");
+                              juce::String error;
+                              if (! proc.saveSongFile (f, error))
+                              {
+                                  showSongError ("Could not save song", error);
+                                  refreshModLabel();
+                                  return;
+                              }
+                              refreshSongLabel();
+                          });
 }
 
 void ModloaderEditor::chooseModsFolder()
@@ -1655,6 +1801,7 @@ void ModloaderEditor::resetDevice()
     select909 (1);
     refreshPatternHeader();
     refreshSteps();
+    refreshSongLabel();
     refreshDisable();
     sync808Radios();
     repaint();
@@ -1944,21 +2091,30 @@ void ModloaderEditor::paint (juce::Graphics& g)
 void ModloaderEditor::resized()
 {
     auto top = juce::Rectangle<int> (16, 12, kEditorW - 32, 40);
-    title.setBounds (top.removeFromLeft (200));
+    title.setBounds (top.removeFromLeft (178));
     const int bandY = top.getY() + 6;
     const int bandH = top.getHeight() - 12;
-    modName.setBounds (top.removeFromLeft (165).withY (bandY).withHeight (bandH));
+    auto icon = [bandY, bandH] (juce::Rectangle<int>& row)
+    {
+        return row.removeFromLeft (bandH).withY (bandY).withHeight (bandH).reduced (1, 0);
+    };
+    modName.setBounds (top.removeFromLeft (150).withY (bandY).withHeight (bandH));
     auto arrows = top.removeFromLeft (16).withY (bandY).withHeight (bandH);
     modUp.setBounds (arrows.removeFromTop (arrows.getHeight() / 2).reduced (1, 0));
     modDown.setBounds (arrows.reduced (1, 0));
     top.removeFromLeft (8);
-    settingsBtn.setBounds (top.removeFromLeft (bandH).withY (bandY).withHeight (bandH).reduced (1, 0));
+    songName.setBounds (top.removeFromLeft (148).withY (bandY).withHeight (bandH));
+    top.removeFromLeft (4);
+    songOpenBtn.setBounds (icon (top));
+    songSaveBtn.setBounds (icon (top));
     top.removeFromLeft (8);
-    status.setBounds (top.removeFromLeft (220));
+    settingsBtn.setBounds (icon (top));
+    top.removeFromLeft (8);
     shuffle.setBounds (top.removeFromRight (40).reduced (0, 2));
     constexpr int shuffleTick = 22;
     shuffleOn.setBounds (top.removeFromRight (shuffleTick).withSizeKeepingCentre (shuffleTick, shuffleTick));
     shuffleN.setBounds (top.removeFromRight (56));
+    status.setBounds (top.withY (bandY).withHeight (bandH));
 
     auto placePattern = [this] (PatternUi& ui, juce::Rectangle<int> r, bool withFlam, bool withSplash)
     {

@@ -104,6 +104,7 @@ version = "0.1.0"
 dependencies = [
  "orb-engine",
  "rbm",
+ "rbs",
 ]
 
 [[package]]

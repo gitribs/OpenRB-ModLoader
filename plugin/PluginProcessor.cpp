@@ -180,6 +180,175 @@ void ModloaderProcessor::resetDevice()
         orb_modloader_set_patterns (engine_.get(), 1, empty.data(), kPatternBytes);
         orb_modloader_reset (engine_.get());
     }
+    songFile = juce::File();
+    songModName = {};
+}
+
+juce::String ModloaderProcessor::songDisplayName() const
+{
+    if (! songFile.getFullPathName().isNotEmpty())
+        return "unsaved";
+    const auto name = songFile.getFileNameWithoutExtension();
+    return name.isNotEmpty() ? name : "unsaved";
+}
+
+void ModloaderProcessor::applySongParams (const OrbModloaderSong& song)
+{
+    auto setParam = [this] (const juce::String& id, int value, bool isBool)
+    {
+        auto* p = apvts.getParameter (id);
+        if (p == nullptr)
+            return;
+        if (isBool)
+            p->setValueNotifyingHost (value != 0 ? 1.0f : 0.0f);
+        else
+            p->setValueNotifyingHost (p->convertTo0to1 ((float) value));
+    };
+
+    setParam (p808Id (0), song.p808[0], true);
+    setParam (p808Id (1), song.p808[1], false);
+    for (int i = 2; i < ORB_MODLOADER_P808; ++i)
+        setParam (p808Id (i), song.p808[i], isSwitch808 (i));
+
+    setParam (p909Id (0), song.p909[0], true);
+    setParam (p909Id (1), song.p909[1], false);
+    for (int i = 2; i < ORB_MODLOADER_P909; ++i)
+        setParam (p909Id (i), song.p909[i], false);
+
+    setParam ("shuffle", song.shuffle, false);
+}
+
+void ModloaderProcessor::fillSongParams (OrbModloaderSong& song) const
+{
+    std::memset (&song, 0, sizeof song);
+    song.p808[0] = asInt (p808Id (0), kDefault808[0]) != 0 ? 1 : 0;
+    song.p808[1] = (uint8_t) juce::jlimit (0, 31, asInt (p808Id (1), kDefault808[1]));
+    for (int i = 2; i < ORB_MODLOADER_P808; ++i)
+    {
+        const int v = asInt (p808Id (i), kDefault808[i]);
+        song.p808[i] = isSwitch808 (i) ? (v != 0 ? 1 : 0) : (uint8_t) juce::jlimit (0, 127, v);
+    }
+    song.p909[0] = asInt (p909Id (0), kDefault909[0]) != 0 ? 1 : 0;
+    song.p909[1] = (uint8_t) juce::jlimit (0, 31, asInt (p909Id (1), kDefault909[1]));
+    for (int i = 2; i < ORB_MODLOADER_P909; ++i)
+        song.p909[i] = (uint8_t) juce::jlimit (0, 127, asInt (p909Id (i), kDefault909[i]));
+    song.shuffle = (uint8_t) juce::jlimit (0, 127, asInt ("shuffle", 64));
+
+    if (engine_ == nullptr)
+        return;
+    char name[ORB_MODLOADER_MOD_NAME] {};
+    orb_modloader_mod_name (engine_.get(), orb_modloader_current_mod (engine_.get()),
+                            name, (int) sizeof name);
+    std::strncpy (song.mod_name, name, sizeof song.mod_name - 1);
+}
+
+bool ModloaderProcessor::loadSongFile (const juce::File& file, juce::String& error)
+{
+    error.clear();
+    if (engine_ == nullptr)
+    {
+        error = "engine is not ready";
+        return false;
+    }
+    if (! file.existsAsFile())
+    {
+        error = "file not found";
+        return false;
+    }
+    juce::MemoryBlock data;
+    if (! file.loadFileAsData (data) || data.getSize() == 0)
+    {
+        error = "could not read song";
+        return false;
+    }
+
+    OrbModloaderSong song {};
+    if (orb_modloader_load_song (engine_.get(), (const uint8_t*) data.getData(),
+                                 (int) data.getSize(), &song) == 0)
+    {
+        char buf[256] {};
+        orb_modloader_status (engine_.get(), buf, (int) sizeof buf);
+        error = juce::String::fromUTF8 (buf);
+        if (error.isEmpty())
+            error = "not a ReBirth 2.x song";
+        return false;
+    }
+
+    applySongParams (song);
+    songModName = juce::String::fromUTF8 (song.mod_name).trim();
+    songFile = file;
+    return true;
+}
+
+bool ModloaderProcessor::saveSongFile (const juce::File& file, juce::String& error)
+{
+    error.clear();
+    if (engine_ == nullptr)
+    {
+        error = "engine is not ready";
+        return false;
+    }
+
+    OrbModloaderSong song {};
+    fillSongParams (song);
+    const int needed = orb_modloader_save_song (engine_.get(), &song, nullptr, 0);
+    if (needed <= 0)
+    {
+        char buf[256] {};
+        orb_modloader_status (engine_.get(), buf, (int) sizeof buf);
+        error = juce::String::fromUTF8 (buf);
+        if (error.isEmpty())
+            error = "could not write song";
+        return false;
+    }
+
+    juce::HeapBlock<uint8_t> buf ((size_t) needed);
+    const int n = orb_modloader_save_song (engine_.get(), &song, buf.getData(), needed);
+    if (n <= 0 || n > needed)
+    {
+        char msg[256] {};
+        orb_modloader_status (engine_.get(), msg, (int) sizeof msg);
+        error = juce::String::fromUTF8 (msg);
+        if (error.isEmpty())
+            error = "could not write song";
+        return false;
+    }
+
+    if (! file.replaceWithData (buf.getData(), (size_t) n))
+    {
+        error = "could not save " + file.getFileName();
+        return false;
+    }
+    songFile = file;
+    return true;
+}
+
+int ModloaderProcessor::loadModByName (const juce::String& name)
+{
+    if (engine_ == nullptr)
+        return -1;
+    const int n = orb_modloader_mod_count (engine_.get());
+    const auto wanted = name.trim();
+    int caseInsensitive = -1;
+    char buf[256] {};
+    for (int i = 0; i < n; ++i)
+    {
+        orb_modloader_mod_name (engine_.get(), i, buf, (int) sizeof buf);
+        const auto have = juce::String::fromUTF8 (buf).trim();
+        if (have == wanted)
+        {
+            orb_modloader_load (engine_.get(), i);
+            return i;
+        }
+        if (caseInsensitive < 0 && have.equalsIgnoreCase (wanted))
+            caseInsensitive = i;
+    }
+    if (caseInsensitive >= 0)
+    {
+        orb_modloader_load (engine_.get(), caseInsensitive);
+        return caseInsensitive;
+    }
+    return -1;
 }
 
 ModloaderProcessor::~ModloaderProcessor() = default;
@@ -559,6 +728,7 @@ void ModloaderProcessor::getStateInformation (juce::MemoryBlock& destData)
         xml->setAttribute ("modIndex", orb_modloader_current_mod (engine_.get()));
         orb_modloader_mod_path (engine_.get(), orb_modloader_current_mod (engine_.get()), buf, (int) sizeof buf);
         xml->setAttribute ("modPath", juce::String::fromUTF8 (buf));
+        xml->setAttribute ("songPath", songFile.getFullPathName());
     }
 
     copyXmlToBinary (*xml, destData);
@@ -618,6 +788,9 @@ void ModloaderProcessor::setStateInformation (const void* data, int sizeInBytes)
     {
         orb_modloader_load (engine_.get(), index);
     }
+
+    const auto savedSong = xml->getStringAttribute ("songPath");
+    songFile = savedSong.isNotEmpty() ? juce::File (savedSong) : juce::File();
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()

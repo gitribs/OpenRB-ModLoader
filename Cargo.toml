@@ -13,6 +13,7 @@ crate-type = ["staticlib", "rlib"]
 [dependencies]
 orb-engine = { path = "third_party/openrb-338/crates/orb-engine" }
 rbm = { path = "third_party/openrb-338/crates/rbm" }
+rbs = { path = "third_party/openrb-338/crates/rbs" }
 
 [profile.release]
 panic = "abort"

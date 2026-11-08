@@ -84,16 +84,18 @@ private:
     bool isUp;
 };
 
-class SettingsButton final : public juce::Button
+class HeaderIconButton final : public juce::Button
 {
 public:
-    SettingsButton();
+    enum class Kind { Settings, Open, Save };
+    explicit HeaderIconButton (Kind kind);
     void paintButton (juce::Graphics&, bool highlighted, bool down) override;
     void mouseDown (const juce::MouseEvent&) override;
     void mouseUp (const juce::MouseEvent&) override;
     void setAttention (bool shouldAttention);
 
 private:
+    Kind kind;
     bool attention = false;
 };
 
@@ -119,6 +121,7 @@ private:
     void sync808Radios();
     void refreshSteps();
     void refreshModLabel();
+    void refreshSongLabel();
     void refreshPatternHeader();
     void refreshShuffle();
     void refreshSplash();
@@ -146,6 +149,11 @@ private:
     bool statusNeedsDat() const;
     juce::String datLocateMessage() const;
     void promptForDatIfNeeded();
+    void chooseSongOpen();
+    void chooseSongSave();
+    void applyOpenedSong (const juce::File&);
+    void finishSongLoad();
+    void showSongError (const juce::String& heading, const juce::String& message);
     void showContextMenu();
     void resetDevice();
     void editCut();
@@ -164,9 +172,11 @@ private:
     ModloaderProcessor& proc;
     ModloaderLookAndFeel lnf;
 
-    juce::Label title, modName, status, shuffleN, flamN;
+    juce::Label title, modName, songName, status, shuffleN, flamN;
     IncDecArrowButton modUp { true }, modDown { false };
-    SettingsButton settingsBtn;
+    HeaderIconButton songOpenBtn { HeaderIconButton::Kind::Open };
+    HeaderIconButton songSaveBtn { HeaderIconButton::Kind::Save };
+    HeaderIconButton settingsBtn { HeaderIconButton::Kind::Settings };
     ModSlider shuffle;
     juce::AudioProcessorValueTreeState::SliderAttachment shuffleA;
     ModToggleButton shuffleOn;

@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 mod iso;
+mod song;
 
 use orb_engine::frame::{BLOCK, Block, ChannelDevice, SongDevice};
 use orb_engine::process::ProcessState;
@@ -23,6 +24,7 @@ use orb_engine::seq::{self, TEMPO_STEP};
 use orb_engine::song::PPQ;
 use orb_engine::{tr808, tr909};
 use rbm::{KeyTable, Rbm, RbmError, standard};
+use song::SongInfo;
 
 /// Engine (and original) sample rate.
 pub const ENGINE_RATE: f64 = 44100.0;
@@ -1070,6 +1072,79 @@ pub unsafe extern "C" fn orb_modloader_splash_jpeg(
                 std::ptr::copy_nonoverlapping(src.as_ptr(), buf, n);
             }
             n as i32
+        },
+        0,
+    )
+}
+
+/// Parse a ReBirth 2.x `.rbs` and apply its 808/909 patterns. Returns 1 and fills `out` on
+/// success. On failure returns 0 and sets [`orb_modloader_status`].
+///
+/// # Safety
+/// `m` from [`orb_modloader_new`]. `data` has `len` bytes. `out` is non-null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn orb_modloader_load_song(
+    m: *mut Modloader,
+    data: *const u8,
+    len: i32,
+    out: *mut SongInfo,
+) -> i32 {
+    if data.is_null() || len <= 0 || out.is_null() {
+        return 0;
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(data, len as usize) };
+    with_mut(
+        m,
+        |p| match p.load_song(bytes) {
+            Ok(info) => {
+                unsafe {
+                    *out = info;
+                }
+                1
+            }
+            Err(msg) => {
+                p.status = msg;
+                0
+            }
+        },
+        0,
+    )
+}
+
+/// Write a ReBirth 2.x `.rbs` from the current 808/909 patterns and `in`. If `buf` is null
+/// or `len` is 0, returns the byte size. Returns 0 on error (see [`orb_modloader_status`]).
+///
+/// # Safety
+/// `m` from [`orb_modloader_new`]. `in` is non-null. `buf` is null or has `len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn orb_modloader_save_song(
+    m: *mut Modloader,
+    info: *const SongInfo,
+    buf: *mut u8,
+    len: i32,
+) -> i32 {
+    let Some(info) = (unsafe { info.as_ref() }) else {
+        return 0;
+    };
+    with_mut(
+        m,
+        |p| match p.save_song(info) {
+            Ok(bytes) => {
+                if buf.is_null() || len <= 0 {
+                    return bytes.len() as i32;
+                }
+                if (len as usize) < bytes.len() {
+                    return bytes.len() as i32;
+                }
+                unsafe {
+                    std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, bytes.len());
+                }
+                bytes.len() as i32
+            }
+            Err(msg) => {
+                p.status = msg;
+                0
+            }
         },
         0,
     )

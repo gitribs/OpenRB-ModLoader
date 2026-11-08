@@ -1,7 +1,7 @@
 use super::*;
 use std::path::Path;
 
-use orb_engine::tr808;
+use orb_engine::{tr808, tr909};
 
 fn jpeg_size(data: &[u8]) -> Option<(u16, u16)> {
     let mut i = 0;
@@ -271,6 +271,74 @@ fn write_min_iso(path: &Path, file_name: &str, payload: &[u8]) {
     }
     image[19 * SECTOR..][..payload.len()].copy_from_slice(payload);
     std::fs::write(path, image).unwrap();
+}
+
+/// A ReBirth 2.x song round-trips 808/909 patterns, knobs, shuffle, and the mod name.
+#[test]
+fn rbs_song_roundtrip_drums() {
+    let mut m = Modloader::new();
+    m.set_step(0, 0, 0, tr808::BD as u8, 1);
+    m.set_step(0, 3, 4, tr808::SD as u8, 1);
+    m.set_step(1, 7, 2, tr909::LT as u8, 2);
+    m.set_pat_length(0, 1, 12);
+    m.set_pat_shuffle(1, 7, 1);
+
+    let mut info = crate::song::SongInfo::default();
+    info.p808 = crate::Params::default().p808;
+    info.p909 = crate::Params::default().p909;
+    info.p808[tr808::BD_LEVEL] = 90;
+    info.p909[tr909::FLAM] = 40;
+    info.shuffle = 77;
+    let name = b"Standard ReBirth";
+    for (i, &b) in name.iter().enumerate() {
+        info.mod_name[i] = b as i8;
+    }
+
+    let bytes = m.save_song(&info).expect("write rbs");
+    let parsed = rbs::Song::parse(&bytes).expect("parse rbs");
+    assert_eq!(parsed.head.version(), "4.2");
+    assert_eq!(parsed.glob.mod_name, "Standard ReBirth");
+    assert_eq!(parsed.tb303[0].params, orb_engine::tb303::DEFAULT_PARAMS[..9]);
+    assert!(parsed.tb303[0].patterns.iter().all(|p| p.steps.iter().all(|s| s.rest == 1)));
+
+    let mut loaded = Modloader::new();
+    let got = loaded.load_song(&bytes).expect("load rbs");
+    assert_eq!(got.p808[tr808::BD_LEVEL], 90);
+    assert_eq!(got.p909[tr909::FLAM], 40);
+    assert_eq!(got.shuffle, 77);
+    let got_name = {
+        let b = got.mod_name.map(|c| c as u8);
+        let n = b.iter().position(|&c| c == 0).unwrap();
+        String::from_utf8_lossy(&b[..n]).into_owned()
+    };
+    assert_eq!(got_name, "Standard ReBirth");
+    assert_eq!(loaded.get_step(0, 0, 0, tr808::BD as u8), 1);
+    assert_eq!(loaded.get_step(0, 3, 4, tr808::SD as u8), 1);
+    assert_eq!(loaded.get_step(1, 7, 2, tr909::LT as u8), 2);
+    assert_eq!(loaded.get_pat_length(0, 1), 12);
+    assert_eq!(loaded.get_pat_shuffle(1, 7), 1);
+    assert_eq!(loaded.get_step(0, 0, 1, tr808::BD as u8), 0);
+}
+
+/// Files before 4.2 convert 808 tom tunings the way ReBirth 2.x does (`v/2 + 32`).
+#[test]
+fn rbs_4_1_converts_808_tom_tune() {
+    let mut song = rbs::Song::empty();
+    song.head.minor = 1;
+    song.tr808.params[10] = 20;
+    let bytes = song.write().unwrap();
+    let mut m = Modloader::new();
+    let info = m.load_song(&bytes).expect("load 4.1");
+    assert_eq!(info.p808[10], 20 / 2 + 32);
+}
+
+/// Garbage bytes are refused and leave patterns alone.
+#[test]
+fn rbs_invalid_file_keeps_patterns() {
+    let mut m = Modloader::new();
+    m.set_step(0, 0, 0, tr808::BD as u8, 1);
+    assert!(m.load_song(&[0, 1, 2, 3, 4]).is_err());
+    assert_eq!(m.get_step(0, 0, 0, tr808::BD as u8), 1);
 }
 
 /// `RB20FUL.DAT` is read from an ISO in place, without extracting the file.

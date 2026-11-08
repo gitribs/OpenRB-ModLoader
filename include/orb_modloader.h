@@ -28,6 +28,15 @@ typedef struct OrbModloaderPlayhead {
     int32_t playing;
 } OrbModloaderPlayhead;
 
+#define ORB_MODLOADER_MOD_NAME 65
+
+typedef struct OrbModloaderSong {
+    uint8_t p808[ORB_MODLOADER_P808];
+    uint8_t p909[ORB_MODLOADER_P909];
+    uint8_t shuffle;
+    char mod_name[ORB_MODLOADER_MOD_NAME];
+} OrbModloaderSong;
+
 OrbModloader *orb_modloader_new(void);
 void orb_modloader_free(OrbModloader *m);
 void orb_modloader_reset(OrbModloader *m);
@@ -62,6 +71,8 @@ void orb_modloader_dat_path(OrbModloader *m, char *buf, int32_t buflen);
 void orb_modloader_set_dat_path(OrbModloader *m, const char *path);
 int32_t orb_modloader_load(OrbModloader *m, int32_t index);
 int32_t orb_modloader_splash_jpeg(OrbModloader *m, uint8_t *buf, int32_t len);
+int32_t orb_modloader_load_song(OrbModloader *m, const uint8_t *data, int32_t len, OrbModloaderSong *out);
+int32_t orb_modloader_save_song(OrbModloader *m, const OrbModloaderSong *in, uint8_t *buf, int32_t len);
 
 #ifdef __cplusplus
 }

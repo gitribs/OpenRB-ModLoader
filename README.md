@@ -2,8 +2,13 @@
 
 A JUCE VST3 / AU / standalone instrument that wraps the ReBirth TR-808 and TR-909 from
 [OpenRB-338](https://github.com/pingw33n/openrb-338). The DSP is a copy of `orb-engine` in
-`third_party/openrb-338`; this project does not rewrite it. Mods are `.rbm` kits, not `.rbs`
-songs. Panel JPEGs inside a mod are unused.
+`third_party/openrb-338`; this project does not rewrite it. Mods are `.rbm` kits.
+Panel JPEGs inside a mod are unused.
+
+The header open/save controls read and write authentic ReBirth 2.x `.rbs` songs. Load
+applies every 808 and 909 pattern and knob from the file and selects the named mod.
+303s, mixer, effects, and song-mode tracks are ignored. Save writes a 4.2 song with
+the current drums and blank 303s (default parameters, rest patterns).
 
 The machines always run at 44100 Hz in 64-sample blocks, the same grid the original uses. Host
 audio at any other rate is resampled on the way out. The host playhead drives the sequencers
@@ -51,6 +56,25 @@ Override with `ORB_MOD_DIR`, or pick a folder in Settings (gear icon). Item 0 is
 
 Up/down steps through the scanned list in byte order of filenames, the same as OpenRB-338.
 Loading a kit swaps samples and keeps patterns, knobs, and step data.
+
+## Songs
+
+The song name sits to the right of the mod picker. It shows the open `.rbs` file, or
+**unsaved** until a song is loaded or saved. The folder icon opens a ReBirth 2.x song;
+the floppy disk saves one. Settings stays to the right of those controls.
+
+Open uses the vendored `rbs` reader (file versions 4.0, 4.1, and 4.2, the ReBirth 2.x
+format) and the same 808 tom-tune conversion ReBirth applies to pre-4.2 files. Only
+the 808 and 909 devices are applied: all 32 patterns per machine, pattern lengths and
+shuffle flags, and the drum knobs including enable and the selected pattern. The GLOB
+mod name is matched against the scanned kit list (item 0 is Standard ReBirth). Tempo,
+vintage, mixer, delay, PCF, distortion, compressor, both 303s, and song-mode
+automation are not used.
+
+Save writes a canonical 4.2 `.rbs` that ReBirth 2.x can open. 808 and 909 knobs and
+patterns are the current panel. 303s are constructor defaults with rest patterns.
+Mixer channels use the ReBirth defaults (master 100, level 100, pan centre). Overwriting
+an original song replaces its 303s and song tracks.
 
 ## Buses
 
