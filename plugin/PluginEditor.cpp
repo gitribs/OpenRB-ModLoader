@@ -27,6 +27,9 @@ constexpr int kFlamKnob = 28;
 constexpr int kLabelH = 14;
 constexpr int kCtrlRow = kLabelH + kKnobSize + 4;
 constexpr int kSlot0X = 148;
+constexpr int kSplashW = 98;
+constexpr int kSplashH = 65;
+constexpr int kSplashGap = 10;
 const juce::Rectangle<int> kMachine808 { 8, 64, kEditorW - 16, 270 };
 const juce::Rectangle<int> kMachine909 { 8, 342, kEditorW - 16, 290 };
 constexpr int k909OuterPad = 16;
@@ -287,6 +290,150 @@ void IncDecArrowButton::mouseUp (const juce::MouseEvent& e)
         juce::Button::mouseUp (e);
 }
 
+class ModloaderEditor::ModPicker final : public juce::Component,
+                                        public juce::ListBoxModel
+{
+public:
+    explicit ModPicker (ModloaderEditor& o) : owner (o)
+    {
+        setWantsKeyboardFocus (true);
+        list.setModel (this);
+        list.setRowHeight (kRowH);
+        list.setOutlineThickness (0);
+        list.setColour (juce::ListBox::backgroundColourId, kPanel);
+        list.setColour (juce::ListBox::outlineColourId, juce::Colours::transparentBlack);
+        list.setMouseMoveSelectsRows (true);
+        list.setWantsKeyboardFocus (true);
+        if (auto* vp = list.getViewport())
+            vp->setScrollBarsShown (false, false, true, false);
+        addAndMakeVisible (list);
+    }
+
+    ~ModPicker() override
+    {
+        list.setModel (nullptr);
+    }
+
+    void setMods (juce::StringArray names, int selected)
+    {
+        mods = std::move (names);
+        current = -1;
+        list.updateContent();
+        syncSelection (selected);
+    }
+
+    void syncSelection (int index)
+    {
+        index = juce::jlimit (0, juce::jmax (0, mods.size() - 1), index);
+        if (current == index)
+            return;
+        current = index;
+        list.selectRow (current, false, false);
+        list.scrollToEnsureRowIsOnscreen (current);
+        list.repaint();
+    }
+
+    int preferredWidth (int minWidth) const
+    {
+        const auto font = juce::Font { juce::FontOptions (13.0f) };
+        int w = minWidth;
+        for (const auto& name : mods)
+            w = juce::jmax (w, juce::GlyphArrangement::getStringWidthInt (font, name) + 24);
+        return juce::jmin (w, 360);
+    }
+
+    int preferredHeight (int maxHeight) const
+    {
+        const int content = mods.size() * kRowH + 2;
+        return juce::jlimit (kRowH + 2, maxHeight, content);
+    }
+
+    int getNumRows() override { return mods.size(); }
+
+    void paintListBoxItem (int row, juce::Graphics& g, int width, int height, bool selected) override
+    {
+        if (! juce::isPositiveAndBelow (row, mods.size()))
+            return;
+        if (selected)
+        {
+            g.setColour (kAmber);
+            g.fillRect (0, 0, width, height);
+        }
+        else if (row == current)
+        {
+            g.setColour (kWell);
+            g.fillRect (0, 0, width, height);
+        }
+        g.setColour (selected ? kBg : kText);
+        g.setFont (juce::FontOptions (13.0f));
+        g.drawText (mods[row], 8, 0, width - 16, height, juce::Justification::centredLeft, true);
+    }
+
+    void listBoxItemClicked (int row, const juce::MouseEvent&) override
+    {
+        pick (row);
+    }
+
+    void returnKeyPressed (int lastRowSelected) override
+    {
+        pick (lastRowSelected);
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        g.setColour (kPanel);
+        g.fillRect (getLocalBounds());
+        g.setColour (kLine);
+        g.drawRect (getLocalBounds(), 1);
+    }
+
+    void resized() override
+    {
+        list.setBounds (getLocalBounds().reduced (1));
+    }
+
+    bool keyPressed (const juce::KeyPress& key) override
+    {
+        if (key == juce::KeyPress::escapeKey)
+        {
+            owner.hideModPicker();
+            return true;
+        }
+        return false;
+    }
+
+    void inputAttemptWhenModal() override
+    {
+        owner.hideModPicker();
+    }
+
+    void focusGained (FocusChangeType) override
+    {
+        list.grabKeyboardFocus();
+    }
+
+    bool canModalEventBeSentToComponent (const juce::Component* target) override
+    {
+        return target == &owner.modName || target == &owner.modUp || target == &owner.modDown
+            || target == &owner.folderBtn || target == &owner.datBtn;
+    }
+
+private:
+    void pick (int row)
+    {
+        if (! juce::isPositiveAndBelow (row, mods.size()))
+            return;
+        owner.loadModIndex (row);
+        owner.hideModPicker();
+    }
+
+    static constexpr int kRowH = 22;
+    ModloaderEditor& owner;
+    juce::ListBox list;
+    juce::StringArray mods;
+    int current = 0;
+};
+
 void StepLed::setOn (bool shouldBeOn)
 {
     if (on == shouldBeOn)
@@ -519,6 +666,7 @@ ModloaderEditor::ModloaderEditor (ModloaderProcessor& p)
     modName.setJustificationType (juce::Justification::centredLeft);
     modName.setColour (juce::Label::backgroundColourId, kWell);
     modName.setColour (juce::Label::outlineColourId, kLine);
+    modName.setMouseCursor (juce::MouseCursor::PointingHandCursor);
     status.setJustificationType (juce::Justification::centredLeft);
 
     addAndMakeVisible (modUp);
@@ -561,6 +709,7 @@ ModloaderEditor::ModloaderEditor (ModloaderProcessor& p)
     pat909.shownBank = currentPattern (1) / 8;
     refreshPatternHeader();
     refreshModLabel();
+    refreshSplash();
     refreshSteps();
     resized();
     startTimerHz (30);
@@ -569,6 +718,7 @@ ModloaderEditor::ModloaderEditor (ModloaderProcessor& p)
 ModloaderEditor::~ModloaderEditor()
 {
     juce::PopupMenu::dismissAllActiveMenus();
+    hideModPicker();
     stopTimer();
     removeMouseListener (&focusListener);
     setLookAndFeel (nullptr);
@@ -906,10 +1056,29 @@ void ModloaderEditor::refreshModLabel()
     if (e == nullptr)
         return;
     char buf[256] {};
-    orb_modloader_mod_name (e, orb_modloader_current_mod (e), buf, (int) sizeof buf);
+    const int index = orb_modloader_current_mod (e);
+    orb_modloader_mod_name (e, index, buf, (int) sizeof buf);
     modName.setText (juce::String::fromUTF8 (buf), juce::dontSendNotification);
     orb_modloader_status (e, buf, (int) sizeof buf);
     status.setText (juce::String::fromUTF8 (buf), juce::dontSendNotification);
+    if (modPicker != nullptr)
+        modPicker->syncSelection (index);
+}
+
+void ModloaderEditor::refreshSplash()
+{
+    splashImage = {};
+    auto* e = eng();
+    splashMod = e != nullptr ? orb_modloader_current_mod (e) : -1;
+    if (e == nullptr)
+        return;
+    const int n = orb_modloader_splash_jpeg (e, nullptr, 0);
+    if (n <= 0)
+        return;
+    juce::HeapBlock<uint8_t> buf ((size_t) n);
+    if (orb_modloader_splash_jpeg (e, buf.getData(), n) <= 0)
+        return;
+    splashImage = juce::ImageFileFormat::loadFrom (buf.getData(), (size_t) n);
 }
 
 void ModloaderEditor::loadMod (int delta)
@@ -925,8 +1094,80 @@ void ModloaderEditor::loadMod (int delta)
         i = n - 1;
     if (i >= n)
         i = 0;
-    orb_modloader_load (e, i);
+    loadModIndex (i);
+}
+
+void ModloaderEditor::loadModIndex (int index)
+{
+    auto* e = eng();
+    if (e == nullptr)
+        return;
+    const int n = orb_modloader_mod_count (e);
+    if (n <= 0)
+        return;
+    orb_modloader_load (e, juce::jlimit (0, n - 1, index));
     refreshModLabel();
+    refreshSplash();
+}
+
+void ModloaderEditor::handleNestedMouseDown (const juce::MouseEvent& e)
+{
+    const bool onPicker = modPicker != nullptr
+        && (e.eventComponent == modPicker.get() || modPicker->isParentOf (e.eventComponent));
+    if (! onPicker)
+        updateMachineFocus (e.getEventRelativeTo (this).getPosition());
+    if (! e.mods.isPopupMenu() && e.eventComponent == &modName)
+        toggleModPicker();
+}
+
+void ModloaderEditor::toggleModPicker()
+{
+    if (modPicker != nullptr)
+        hideModPicker();
+    else
+        showModPicker();
+}
+
+void ModloaderEditor::showModPicker()
+{
+    auto* e = eng();
+    if (e == nullptr || modPicker != nullptr)
+        return;
+    const int n = orb_modloader_mod_count (e);
+    if (n <= 0)
+        return;
+
+    juce::StringArray names;
+    names.ensureStorageAllocated (n);
+    char buf[256] {};
+    for (int i = 0; i < n; ++i)
+    {
+        orb_modloader_mod_name (e, i, buf, (int) sizeof buf);
+        names.add (juce::String::fromUTF8 (buf));
+    }
+
+    modPicker = std::make_unique<ModPicker> (*this);
+    modPicker->setMods (std::move (names), orb_modloader_current_mod (e));
+
+    const int width = modPicker->preferredWidth (modName.getWidth());
+    const int maxH = juce::jmax (24, getHeight() - modName.getBottom() - 8);
+    const int height = modPicker->preferredHeight (juce::jmin (maxH, 22 * 14 + 2));
+    auto bounds = juce::Rectangle<int> (modName.getX(), modName.getBottom() - 1, width, height);
+    if (bounds.getRight() > getWidth() - 8)
+        bounds.setX (getWidth() - 8 - bounds.getWidth());
+    addAndMakeVisible (*modPicker);
+    modPicker->setBounds (bounds);
+    modPicker->toFront (true);
+    modPicker->enterModalState (true, nullptr, false);
+}
+
+void ModloaderEditor::hideModPicker()
+{
+    if (modPicker == nullptr)
+        return;
+    auto picker = std::move (modPicker);
+    if (picker->isCurrentlyModal())
+        picker->exitModalState (0);
 }
 
 void ModloaderEditor::applyPickedMod (const juce::File& f)
@@ -953,11 +1194,14 @@ void ModloaderEditor::applyPickedMod (const juce::File& f)
         }
     }
 
+    hideModPicker();
     refreshModLabel();
+    refreshSplash();
 }
 
 void ModloaderEditor::chooseModsFolder()
 {
+    hideModPicker();
     auto* e = eng();
     char folder[1024] {};
     char current[1024] {};
@@ -983,6 +1227,7 @@ void ModloaderEditor::chooseModsFolder()
 
 void ModloaderEditor::chooseDat()
 {
+    hideModPicker();
     auto* e = eng();
     char folder[1024] {};
     char existing[1024] {};
@@ -1017,6 +1262,7 @@ void ModloaderEditor::chooseDat()
                               proc.setKeyPath (f.getFullPathName());
                               orb_modloader_load (engine, orb_modloader_current_mod (engine));
                               refreshModLabel();
+                              refreshSplash();
                           });
 }
 
@@ -1225,6 +1471,9 @@ void ModloaderEditor::timerCallback()
     refreshDisable();
     sync808Radios();
     refreshModLabel();
+    if (auto* e = eng())
+        if (orb_modloader_current_mod (e) != splashMod)
+            refreshSplash();
     repaint();
 }
 
@@ -1313,6 +1562,17 @@ void ModloaderEditor::paint (juce::Graphics& g)
     paintSlots (slot808, false);
     paintSlots (slot909, true);
 
+    auto paintSplash = [&] (juce::Rectangle<int> r)
+    {
+        if (r.isEmpty() || ! splashImage.isValid())
+            return;
+        g.setImageResamplingQuality (juce::Graphics::highResamplingQuality);
+        g.drawImage (splashImage, r.toFloat());
+        g.setColour (kLine);
+        g.drawRect (r, 1);
+    };
+    paintSplash (splash808);
+
     auto markDisabled = [&] (const juce::Label& legend, int bus)
     {
         if (bus < 0)
@@ -1359,7 +1619,7 @@ void ModloaderEditor::resized()
     shuffleOn.setBounds (top.removeFromRight (shuffleTick).withSizeKeepingCentre (shuffleTick, shuffleTick));
     shuffleN.setBounds (top.removeFromRight (56));
 
-    auto placePattern = [this] (PatternUi& ui, juce::Rectangle<int> r, bool withFlam)
+    auto placePattern = [this] (PatternUi& ui, juce::Rectangle<int> r, bool withFlam, bool withSplash)
     {
         constexpr int gap = 2;
         auto grid = r.removeFromTop (56);
@@ -1379,6 +1639,13 @@ void ModloaderEditor::resized()
         const int bw = (banks.getWidth() - gap * 3) / 4;
         for (int i = 0; i < 4; ++i)
             ui.bank[i].setBounds (banks.getX() + i * (bw + gap), banks.getY(), bw, banks.getHeight());
+
+        if (withSplash)
+        {
+            r.removeFromTop (kSplashGap);
+            auto thumb = r.removeFromTop (kSplashH);
+            splash808 = { thumb.getX() + (thumb.getWidth() - kSplashW) / 2, thumb.getY(), kSplashW, kSplashH };
+        }
 
         auto bottom = r.removeFromBottom (withFlam ? 88 : 46);
         if (withFlam)
@@ -1406,8 +1673,8 @@ void ModloaderEditor::resized()
     constexpr int leftColW = 118;
     pat808.enable.setBounds (leftColX, 72, toggleContentWidth (pat808.enable, enableH), enableH);
     pat909.enable.setBounds (leftColX, 350, toggleContentWidth (pat909.enable, enableH), enableH);
-    placePattern (pat808, { leftColX, 72 + enableH + enableGap, leftColW, 322 - (72 + enableH + enableGap) }, false);
-    placePattern (pat909, { leftColX, 350 + enableH + enableGap, leftColW, 620 - (350 + enableH + enableGap) }, true);
+    placePattern (pat808, { leftColX, 72 + enableH + enableGap, leftColW, 322 - (72 + enableH + enableGap) }, false, true);
+    placePattern (pat909, { leftColX, 350 + enableH + enableGap, leftColW, 620 - (350 + enableH + enableGap) }, true, false);
 
     const int y808 = 76;
     const int y909 = 358;

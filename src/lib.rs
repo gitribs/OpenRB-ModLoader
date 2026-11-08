@@ -229,7 +229,25 @@ fn open_key(path: &Path) -> Result<KeySource, String> {
         .map_err(|_| "needs DAT/ISO".to_string())
 }
 
-fn load_kit(path: &Path, dat: Option<&Path>, mods_dir: &Path) -> Result<Arc<SampleSet>, String> {
+struct LoadedKit {
+    set: Arc<SampleSet>,
+    splash: Vec<u8>,
+}
+
+fn splash_jpeg(rbm: &Rbm, table: &KeyTable) -> Vec<u8> {
+    rbm.file_by_name("splash.jpg", table)
+        .ok()
+        .filter(|b| b.starts_with(&[0xFF, 0xD8]))
+        .unwrap_or_default()
+}
+
+fn builtin_splash() -> Vec<u8> {
+    standard::builtin_file("splash.jpg")
+        .filter(|b| b.starts_with(&[0xFF, 0xD8]))
+        .unwrap_or_default()
+}
+
+fn load_kit(path: &Path, dat: Option<&Path>, mods_dir: &Path) -> Result<LoadedKit, String> {
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
     let rbm = Rbm::parse(bytes).map_err(|e| e.to_string())?;
     let builtin = standard::builtin_samples();
@@ -245,7 +263,10 @@ fn load_kit(path: &Path, dat: Option<&Path>, mods_dir: &Path) -> Result<Arc<Samp
         }
     };
     match rbm.load_samples(&table, &builtin) {
-        Ok(loaded) => Ok(Arc::new(loaded.set)),
+        Ok(loaded) => Ok(LoadedKit {
+            set: Arc::new(loaded.set),
+            splash: splash_jpeg(&rbm, &table),
+        }),
         Err(RbmError::KeyNotCovered(_)) => Err("needs DAT/ISO".to_string()),
         Err(RbmError::WrongKey(_)) => Err("bad key".to_string()),
         Err(e) => Err(e.to_string()),
@@ -273,6 +294,8 @@ pub struct Modloader {
     dat_path: Option<PathBuf>,
     current: usize,
     status: String,
+    /// `splash.jpg` of the kit that is sounding, or empty if the mod has none.
+    splash: Vec<u8>,
 }
 
 impl Default for Modloader {
@@ -309,6 +332,7 @@ impl Modloader {
             dat_path: None,
             current: 0,
             status: String::new(),
+            splash: builtin_splash(),
         };
         m.scan_dir();
         m
@@ -668,6 +692,11 @@ impl Modloader {
             .unwrap_or("")
     }
 
+    /// JPEG bytes of the sounding kit's `splash.jpg` (empty if the kit has none).
+    pub fn splash_jpeg(&self) -> &[u8] {
+        &self.splash
+    }
+
     pub fn set_dat_path(&mut self, path: &Path) {
         self.dat_path = Some(path.to_path_buf());
     }
@@ -681,6 +710,7 @@ impl Modloader {
         }
         if i == 0 {
             self.apply_kit(standard::builtin_samples());
+            self.splash = builtin_splash();
             self.current = 0;
             self.status.clear();
             return 1;
@@ -689,8 +719,9 @@ impl Modloader {
         let dat = self.dat_path.clone();
         let mods_dir = self.mods_dir.clone();
         match load_kit(&path, dat.as_deref(), &mods_dir) {
-            Ok(set) => {
-                self.apply_kit(set);
+            Ok(kit) => {
+                self.apply_kit(kit.set);
+                self.splash = kit.splash;
                 self.current = i;
                 self.status.clear();
                 1
@@ -1015,6 +1046,33 @@ pub unsafe extern "C" fn orb_modloader_set_dat_path(m: *mut Modloader, path: *co
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn orb_modloader_load(m: *mut Modloader, index: i32) -> i32 {
     with_mut(m, |p| p.load(index), 0)
+}
+
+/// Copies the sounding kit's `splash.jpg` into `buf`.
+///
+/// # Safety
+/// `m` from [`orb_modloader_new`], or null. `buf` is null to query the size, or has `len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn orb_modloader_splash_jpeg(
+    m: *mut Modloader,
+    buf: *mut u8,
+    len: i32,
+) -> i32 {
+    with_ref(
+        m,
+        |p| {
+            let src = p.splash_jpeg();
+            if buf.is_null() || len <= 0 {
+                return src.len() as i32;
+            }
+            let n = src.len().min(len as usize);
+            unsafe {
+                std::ptr::copy_nonoverlapping(src.as_ptr(), buf, n);
+            }
+            n as i32
+        },
+        0,
+    )
 }
 
 #[cfg(test)]

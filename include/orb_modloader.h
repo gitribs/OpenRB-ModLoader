@@ -61,6 +61,7 @@ void orb_modloader_status(OrbModloader *m, char *buf, int32_t buflen);
 void orb_modloader_dat_path(OrbModloader *m, char *buf, int32_t buflen);
 void orb_modloader_set_dat_path(OrbModloader *m, const char *path);
 int32_t orb_modloader_load(OrbModloader *m, int32_t index);
+int32_t orb_modloader_splash_jpeg(OrbModloader *m, uint8_t *buf, int32_t len);
 
 #ifdef __cplusplus
 }

@@ -108,6 +108,7 @@ private:
     void refreshModLabel();
     void refreshPatternHeader();
     void refreshShuffle();
+    void refreshSplash();
     void refreshDisable();
     void setupDisable (juce::ToggleButton& btn, int machine);
     void click808Step (int step);
@@ -115,7 +116,12 @@ private:
     void select808 (int col);
     void select909 (int col);
     void bumpLength (int machine, int delta);
+    void handleNestedMouseDown (const juce::MouseEvent&);
     void loadMod (int delta);
+    void loadModIndex (int index);
+    void toggleModPicker();
+    void showModPicker();
+    void hideModPicker();
     void chooseModsFolder();
     void applyPickedMod (const juce::File&);
     void chooseDat();
@@ -185,13 +191,16 @@ private:
     ModToggleButton disable808 { "MUTE" }, disable909 { "MUTE" };
     int sel909 = 1;
     int focusedMachine = -1;
+    juce::Image splashImage;
+    juce::Rectangle<int> splash808;
+    int splashMod = -1;
 
     struct FocusListener final : public juce::MouseListener
     {
         explicit FocusListener (ModloaderEditor& o) : owner (o) {}
         void mouseDown (const juce::MouseEvent& e) override
         {
-            owner.updateMachineFocus (e.getEventRelativeTo (&owner).getPosition());
+            owner.handleNestedMouseDown (e);
         }
         void mouseUp (const juce::MouseEvent& e) override
         {
@@ -204,6 +213,8 @@ private:
     };
     FocusListener focusListener { *this };
 
+    class ModPicker;
+    std::unique_ptr<ModPicker> modPicker;
     std::unique_ptr<juce::FileChooser> chooser;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ModloaderEditor)

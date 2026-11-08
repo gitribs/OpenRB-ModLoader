@@ -3,6 +3,39 @@ use std::path::Path;
 
 use orb_engine::tr808;
 
+fn jpeg_size(data: &[u8]) -> Option<(u16, u16)> {
+    let mut i = 0;
+    while i + 1 < data.len() {
+        if data[i] != 0xFF {
+            i += 1;
+            continue;
+        }
+        let marker = data[i + 1];
+        if marker == 0xD8 || marker == 0xD9 || (0xD0..=0xD7).contains(&marker) || marker == 0x01 {
+            i += 2;
+            continue;
+        }
+        if i + 3 >= data.len() {
+            break;
+        }
+        let len = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
+        if matches!(
+            marker,
+            0xC0 | 0xC1 | 0xC2 | 0xC3 | 0xC5 | 0xC6 | 0xC7 | 0xC9 | 0xCA | 0xCB | 0xCD | 0xCE | 0xCF
+        ) && i + 8 < data.len()
+        {
+            let h = u16::from_be_bytes([data[i + 5], data[i + 6]]);
+            let w = u16::from_be_bytes([data[i + 7], data[i + 8]]);
+            return Some((w, h));
+        }
+        if len < 2 {
+            break;
+        }
+        i += 2 + len;
+    }
+    None
+}
+
 fn playing(ppq: f64) -> Playhead {
     Playhead {
         bpm: 120.0,
@@ -27,6 +60,18 @@ fn run(
 
 fn energy(buf: &[f32]) -> f32 {
     buf.iter().map(|x| x.abs()).sum()
+}
+
+/// Built-in Standard ReBirth exposes splash.jpg as a JPEG (the bottom sprite of the
+/// packed 258x1934 panel atlas used by mod tools).
+#[test]
+fn builtin_kit_has_splash_jpeg() {
+    let mut m = Modloader::new();
+    let jpeg = m.splash_jpeg().to_vec();
+    assert!(jpeg.starts_with(&[0xFF, 0xD8]), "splash is a JPEG");
+    assert_eq!(jpeg_size(&jpeg), Some((256, 256)));
+    assert_eq!(m.load(0), 1);
+    assert_eq!(m.splash_jpeg(), jpeg);
 }
 
 /// Built-in Standard ReBirth constructs both machines and is always list item 0.
