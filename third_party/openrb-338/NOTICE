@@ -1,0 +1,6 @@
+Copyright (C) 2026 the OpenRB-338 authors.
+
+orb-engine and rbs in this directory are a copy of those crates from
+OpenRB-338 (https://github.com/pingw33n/openrb-338), licensed GPL-3.0-only.
+The license text is LICENSE. This copy does not include that project's
+tests or its other crates. The OpenRB-338 tree was not modified.

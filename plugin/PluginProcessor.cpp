@@ -1,0 +1,608 @@
+#include "PluginProcessor.h"
+#include "PluginEditor.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+
+namespace
+{
+constexpr double kEngineRate = 44100.0;
+constexpr int kBlock = 64;
+
+constexpr uint8_t kDefault808[] = {
+    1, 0, 40, 100, 64, 64, 100, 64, 64, 100, 64, 0, 100, 64, 0, 100, 64, 0, 100, 0, 100, 0, 100,
+    100, 0, 100, 100, 100, 100
+};
+constexpr uint8_t kDefault909[] = {
+    1, 0, 32, 100, 64, 64, 127, 100, 64, 64, 64, 100, 64, 127, 100, 64, 127, 100, 64, 127, 100,
+    100, 100, 32, 127, 100, 64, 100, 64, 64
+};
+
+const char* kAuxNames[ORB_MODLOADER_AUX] = {
+    "808 BD", "808 SD", "808 LT", "808 MT", "808 HT", "808 RS", "808 CP", "808 CB", "808 OH",
+    "808 CH", "808 CY", "909 BD", "909 SD", "909 LT", "909 MT", "909 HT", "909 RS", "909 CP",
+    "909 CH", "909 OH", "909 CC", "909 RC"
+};
+
+const char* k808Names[ORB_MODLOADER_P808] = {
+    "808 Enable", "808 Pattern", "808 Accent", "808 BD Level", "808 BD Tone", "808 BD Decay",
+    "808 SD Level", "808 SD Tone", "808 SD Snappy", "808 LT Level", "808 LT Tune", "808 LT/LC",
+    "808 MT Level", "808 MT Tune", "808 MT/MC", "808 HT Level", "808 HT Tune", "808 HT/HC",
+    "808 RS Level", "808 RS/CL", "808 CP Level", "808 CP/MA", "808 CB Level", "808 CY Level",
+    "808 CY Tone", "808 CY Decay", "808 OH Level", "808 OH Decay", "808 CH Level"
+};
+
+const char* k909Names[ORB_MODLOADER_P909] = {
+    "909 Enable", "909 Pattern", "909 Accent", "909 BD Level", "909 BD Tune", "909 BD Attack",
+    "909 BD Decay", "909 SD Level", "909 SD Tune", "909 SD Tone", "909 SD Snappy", "909 LT Level",
+    "909 LT Tune", "909 LT Decay", "909 MT Level", "909 MT Tune", "909 MT Decay", "909 HT Level",
+    "909 HT Tune", "909 HT Decay", "909 RS Level", "909 CP Level", "909 HH Level", "909 CH Decay",
+    "909 OH Decay", "909 CC Level", "909 CC Tune", "909 RC Level", "909 RC Tune", "909 Flam"
+};
+
+bool ratesMatch (double a, double b)
+{
+    return std::abs (a - b) < 1.0e-6;
+}
+
+bool isSwitch808 (int ctrl)
+{
+    return ctrl == 11 || ctrl == 14 || ctrl == 17 || ctrl == 19 || ctrl == 21;
+}
+} // namespace
+
+const char* ModloaderProcessor::auxName (int index)
+{
+    if (index < 0 || index >= kAuxBuses)
+        return "";
+    return kAuxNames[index];
+}
+
+const juce::String ModloaderProcessor::getOutputChannelName (int index) const
+{
+    int busIdx = 0;
+    const int ch = getOffsetInBusBufferForAbsoluteChannelIndex (false, index, busIdx);
+    if (ch < 0)
+        return {};
+
+    auto* bus = getBus (false, busIdx);
+    if (bus == nullptr)
+        return {};
+
+    auto name = bus->getName();
+    const auto layout = bus->getCurrentLayout();
+    if (layout.size() > 1)
+        name += " " + juce::AudioChannelSet::getAbbreviatedChannelTypeName (layout.getTypeOfChannel (ch));
+    return name;
+}
+
+juce::String ModloaderProcessor::p808Id (int ctrl)
+{
+    return "808_" + juce::String (ctrl);
+}
+
+juce::String ModloaderProcessor::p909Id (int ctrl)
+{
+    return "909_" + juce::String (ctrl);
+}
+
+juce::String ModloaderProcessor::directId (int aux)
+{
+    return "direct_" + juce::String (aux);
+}
+
+juce::AudioProcessor::BusesProperties ModloaderProcessor::createBuses()
+{
+    auto buses = BusesProperties().withOutput ("Output", juce::AudioChannelSet::stereo(), true);
+    for (int i = 0; i < kAuxBuses; ++i)
+        buses = buses.withOutput (kAuxNames[i], juce::AudioChannelSet::mono(), false);
+    return buses;
+}
+
+namespace
+{
+juce::File prefsDir()
+{
+    return juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
+        .getChildFile ("OpenRB");
+}
+
+juce::String loadRememberedPath (const juce::String& filename)
+{
+    const auto f = prefsDir().getChildFile (filename);
+    if (! f.existsAsFile())
+        return {};
+    return f.loadFileAsString().trim();
+}
+
+void saveRememberedPath (const juce::String& filename, const juce::String& path)
+{
+    if (path.isEmpty())
+        return;
+    auto f = prefsDir().getChildFile (filename);
+    f.getParentDirectory().createDirectory();
+    f.replaceWithText (path);
+}
+
+constexpr auto kKeyPathFile = "Modloader.keypath";
+constexpr auto kModsFolderFile = "Modloader.modsfolder";
+}
+
+ModloaderProcessor::ModloaderProcessor()
+    : AudioProcessor (createBuses()),
+      apvts (*this, nullptr, "PARAMS", createLayout()),
+      engine_ (orb_modloader_new())
+{
+    if (engine_ == nullptr)
+        return;
+
+    const auto rememberedDat = loadRememberedPath (kKeyPathFile);
+    if (rememberedDat.isNotEmpty())
+        orb_modloader_set_dat_path (engine_.get(), rememberedDat.toRawUTF8());
+
+    // ORB_MOD_DIR already applied in orb_modloader_new(); don't override it.
+    if (juce::SystemStats::getEnvironmentVariable ("ORB_MOD_DIR", {}).isEmpty())
+    {
+        const auto rememberedMods = loadRememberedPath (kModsFolderFile);
+        if (rememberedMods.isNotEmpty())
+            orb_modloader_scan (engine_.get(), rememberedMods.toRawUTF8());
+    }
+}
+
+void ModloaderProcessor::setKeyPath (const juce::String& path)
+{
+    if (engine_ != nullptr && path.isNotEmpty())
+        orb_modloader_set_dat_path (engine_.get(), path.toRawUTF8());
+    saveRememberedPath (kKeyPathFile, path);
+}
+
+void ModloaderProcessor::setModsFolder (const juce::String& path)
+{
+    if (engine_ != nullptr && path.isNotEmpty())
+        orb_modloader_scan (engine_.get(), path.toRawUTF8());
+    saveRememberedPath (kModsFolderFile, path);
+}
+
+ModloaderProcessor::~ModloaderProcessor() = default;
+
+juce::AudioProcessorValueTreeState::ParameterLayout ModloaderProcessor::createLayout()
+{
+    using juce::AudioParameterBool;
+    using juce::AudioParameterChoice;
+    using juce::AudioParameterInt;
+    using juce::ParameterID;
+
+    std::vector<std::unique_ptr<juce::RangedAudioParameter>> p;
+
+    p.push_back (std::make_unique<AudioParameterBool> (
+        ParameterID { p808Id (0), 1 }, k808Names[0], kDefault808[0] != 0));
+    p.push_back (std::make_unique<AudioParameterInt> (
+        ParameterID { p808Id (1), 1 }, k808Names[1], 0, 31, kDefault808[1]));
+    for (int i = 2; i < ORB_MODLOADER_P808; ++i)
+    {
+        if (isSwitch808 (i))
+            p.push_back (std::make_unique<AudioParameterBool> (
+                ParameterID { p808Id (i), 1 }, k808Names[i], kDefault808[i] != 0));
+        else
+            p.push_back (std::make_unique<AudioParameterInt> (
+                ParameterID { p808Id (i), 1 }, k808Names[i], 0, 127, kDefault808[i]));
+    }
+
+    p.push_back (std::make_unique<AudioParameterBool> (
+        ParameterID { p909Id (0), 1 }, k909Names[0], kDefault909[0] != 0));
+    p.push_back (std::make_unique<AudioParameterInt> (
+        ParameterID { p909Id (1), 1 }, k909Names[1], 0, 31, kDefault909[1]));
+    for (int i = 2; i < ORB_MODLOADER_P909; ++i)
+        p.push_back (std::make_unique<AudioParameterInt> (
+            ParameterID { p909Id (i), 1 }, k909Names[i], 0, 127, kDefault909[i]));
+
+    // ReBirth default 64. Amounts 0–5 are identity (engine divides by 6).
+    p.push_back (std::make_unique<AudioParameterInt> (ParameterID { "shuffle", 1 }, "Shuffle", 0, 127, 64));
+
+    for (int i = 0; i < kAuxBuses; ++i)
+        p.push_back (std::make_unique<AudioParameterBool> (
+            ParameterID { directId (i), 1 }, juce::String ("Mute ") + kAuxNames[i], false));
+
+    return { p.begin(), p.end() };
+}
+
+void ModloaderProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
+{
+    hostRate = sampleRate > 0.0 ? sampleRate : kEngineRate;
+    exact44100 = ratesMatch (hostRate, kEngineRate);
+    maxHostBlock = std::max (samplesPerBlock, 1);
+
+    const int extra = 256 + (int) juce::WindowedSincInterpolator::getBaseLatency();
+    const int maxEngine = (int) std::ceil ((double) maxHostBlock * kEngineRate / std::min (hostRate, kEngineRate))
+                          + extra + kBlock;
+
+    engineBuf.setSize (kTotalCh, maxEngine);
+    engineFifo.setSize (kTotalCh, maxEngine + extra);
+    scratch.setSize (1, std::max (maxHostBlock, maxEngine));
+    engineBuf.clear();
+    engineFifo.clear();
+    scratch.clear();
+    engineFifoFill = 0;
+
+    for (auto& i : toHost)
+        i.reset();
+
+    if (engine_)
+        orb_modloader_reset (engine_.get());
+
+    clearPlayClock();
+    setLatencySamples (latencySamples());
+}
+
+void ModloaderProcessor::releaseResources() {}
+
+void ModloaderProcessor::reset()
+{
+    engineBuf.clear();
+    engineFifo.clear();
+    engineFifoFill = 0;
+    for (auto& i : toHost)
+        i.reset();
+    if (engine_)
+        orb_modloader_reset (engine_.get());
+    clearPlayClock();
+}
+
+void ModloaderProcessor::clearPlayClock()
+{
+    havePlayOrigin = false;
+    playOrigin = 0.0;
+    haveLastRawPpq = false;
+    lastRawPpq = 0.0;
+    haveLastSamples = false;
+    lastSamples = 0;
+    if (engine_)
+        orb_modloader_restart_clock (engine_.get());
+}
+
+int ModloaderProcessor::latencySamples() const
+{
+    const int delayLatency = (int) std::llround ((double) kBlock * hostRate / kEngineRate);
+    if (exact44100)
+        return delayLatency;
+
+    const double base = juce::WindowedSincInterpolator::getBaseLatency();
+    const double downHost = base * hostRate / kEngineRate;
+    return delayLatency + (int) std::llround (downHost);
+}
+
+bool ModloaderProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
+{
+    if (layouts.getMainOutputChannelSet() != juce::AudioChannelSet::stereo())
+        return false;
+
+    for (const auto& set : layouts.inputBuses)
+        if (! set.isDisabled())
+            return false;
+
+    // Hosts disable an aux as disabled(), 0 channels, or discrete-0. Rejecting those
+    // layouts leaves the bus enabled, so the slot never returns to the main mix.
+    for (int i = 1; i < layouts.outputBuses.size(); ++i)
+        if (layouts.outputBuses.getUnchecked (i).size() > 1)
+            return false;
+
+    return true;
+}
+
+bool ModloaderProcessor::canApplyBusesLayout (const BusesLayout& layouts) const
+{
+    return isBusesLayoutSupported (layouts);
+}
+
+int ModloaderProcessor::asInt (const juce::String& id, int fallback) const
+{
+    if (auto* v = apvts.getRawParameterValue (id))
+        return juce::roundToInt (v->load());
+    return fallback;
+}
+
+OrbModloaderParams ModloaderProcessor::readParams (bool bypass) const
+{
+    OrbModloaderParams params {};
+    params.p808[0] = asInt (p808Id (0), kDefault808[0]) != 0 ? 1 : 0;
+    params.p808[1] = (uint8_t) juce::jlimit (0, 31, asInt (p808Id (1), kDefault808[1]));
+    for (int i = 2; i < ORB_MODLOADER_P808; ++i)
+    {
+        const int v = asInt (p808Id (i), kDefault808[i]);
+        params.p808[i] = isSwitch808 (i) ? (v != 0 ? 1 : 0) : (uint8_t) juce::jlimit (0, 127, v);
+    }
+    params.p909[0] = asInt (p909Id (0), kDefault909[0]) != 0 ? 1 : 0;
+    params.p909[1] = (uint8_t) juce::jlimit (0, 31, asInt (p909Id (1), kDefault909[1]));
+    for (int i = 2; i < ORB_MODLOADER_P909; ++i)
+        params.p909[i] = (uint8_t) juce::jlimit (0, 127, asInt (p909Id (i), kDefault909[i]));
+    params.shuffle = (uint8_t) juce::jlimit (0, 127, asInt ("shuffle", 64));
+    for (int i = 0; i < kAuxBuses; ++i)
+        params.direct[i] = asInt (directId (i), 0) != 0 ? 1 : 0;
+    params.bypass = bypass ? 1 : 0;
+    return params;
+}
+
+static double startingQuarter (double rawPpq, bool hasPpq, juce::int64 samples, bool hasSamples, double bpm, double hostRate)
+{
+    const bool canDerive = hasSamples && hostRate > 0.0 && bpm > 0.0;
+    const double derived = canDerive ? (double) samples * bpm / (hostRate * 60.0) : 0.0;
+    if (!hasPpq)
+        return canDerive ? derived : 0.0;
+    if (canDerive && std::abs (rawPpq) < 1.0e-6 && derived > 0.25)
+        return derived;
+    return rawPpq;
+}
+
+OrbModloaderPlayhead ModloaderProcessor::readPlayhead (int nHost)
+{
+    OrbModloaderPlayhead head { 120.0, 0.0, 0 };
+    const bool standalone = wrapperType == wrapperType_Standalone;
+    if (standalone)
+    {
+        head.bpm = 120.0;
+        head.playing = 1;
+        return head;
+    }
+
+    if (auto* ph = getPlayHead())
+    {
+        if (auto info = ph->getPosition())
+        {
+            head.bpm = info->getBpm().orFallback (120.0);
+            if (!(head.bpm > 0.0) || !std::isfinite (head.bpm))
+                head.bpm = 120.0;
+
+            const auto rawOpt = info->getPpqPosition();
+            const bool hasPpq = rawOpt.hasValue() && std::isfinite (*rawOpt);
+            const double rawPpq = hasPpq ? *rawOpt : 0.0;
+
+            const auto sampleOpt = info->getTimeInSamples();
+            const bool hasSamples = sampleOpt.hasValue();
+            const juce::int64 samples = hasSamples ? *sampleOpt : 0;
+
+            const bool ppqMoving = hasPpq && haveLastRawPpq && std::abs (rawPpq - lastRawPpq) > 1.0e-9;
+            const bool samplesMoving = hasSamples && haveLastSamples && samples != lastSamples;
+            head.playing = (info->getIsPlaying() || info->getIsRecording() || ppqMoving || samplesMoving) ? 1 : 0;
+
+            const double advance = (hostRate > 0.0 && nHost > 0)
+                                       ? (double) nHost * head.bpm / (hostRate * 60.0)
+                                       : 0.0;
+
+            if (!havePlayOrigin)
+            {
+                playOrigin = startingQuarter (rawPpq, hasPpq, samples, hasSamples, head.bpm, hostRate);
+                havePlayOrigin = true;
+            }
+
+            double reported = playOrigin;
+            if (head.playing != 0 && advance > 0.0)
+            {
+                const bool haveDelta = hasPpq && haveLastRawPpq;
+                const double delta = haveDelta ? rawPpq - lastRawPpq : 0.0;
+                const bool agrees = haveDelta && std::abs (delta - advance) < std::max (1.0e-4, advance * 0.5);
+                const bool jumped = haveDelta && std::abs (delta) > std::max (1.0, advance * 4.0);
+                if (agrees || jumped)
+                    reported = rawPpq;
+                playOrigin = reported + advance;
+            }
+            else if (head.playing == 0 && hasPpq && haveLastRawPpq
+                     && std::abs (rawPpq - lastRawPpq) > std::max (1.0, advance * 4.0))
+            {
+                playOrigin = rawPpq;
+                reported = rawPpq;
+            }
+
+            head.ppq = std::isfinite (reported) ? reported : 0.0;
+
+            if (hasPpq)
+            {
+                lastRawPpq = rawPpq;
+                haveLastRawPpq = true;
+            }
+            if (hasSamples)
+            {
+                lastSamples = samples;
+                haveLastSamples = true;
+            }
+        }
+    }
+    return head;
+}
+
+void ModloaderProcessor::shiftFifo (juce::AudioBuffer<float>& fifo, int& fill, int used)
+{
+    if (used <= 0)
+        return;
+    if (used >= fill)
+    {
+        fill = 0;
+        return;
+    }
+    const int remain = fill - used;
+    for (int ch = 0; ch < fifo.getNumChannels(); ++ch)
+        std::memmove (fifo.getWritePointer (ch), fifo.getReadPointer (ch) + used, (size_t) remain * sizeof (float));
+    fill = remain;
+}
+
+void ModloaderProcessor::engineToHost (float* const* hostOut, int nHost, int nEngine, int nCh)
+{
+    const int cap = engineFifo.getNumSamples();
+    const int take = juce::jmin (nEngine, cap - engineFifoFill);
+    if (take > 0)
+    {
+        for (int ch = 0; ch < nCh; ++ch)
+            std::memcpy (engineFifo.getWritePointer (ch) + engineFifoFill, engineBuf.getReadPointer (ch),
+                         (size_t) take * sizeof (float));
+        engineFifoFill += take;
+    }
+
+    const double speed = kEngineRate / hostRate;
+    int used = 0;
+    for (int ch = 0; ch < nCh; ++ch)
+        if (hostOut[ch] != nullptr)
+            used = toHost[ch].process (speed, engineFifo.getReadPointer (ch), hostOut[ch], nHost, engineFifoFill, 0);
+
+    shiftFifo (engineFifo, engineFifoFill, juce::jmin (used, engineFifoFill));
+}
+
+void ModloaderProcessor::processBuffer (juce::AudioBuffer<float>& buffer, bool bypass)
+{
+    juce::ScopedNoDenormals noDenormals;
+
+    const int nHost = buffer.getNumSamples();
+    if (nHost <= 0 || engine_ == nullptr)
+        return;
+
+    buffer.clear();
+
+    auto params = readParams (bypass);
+    const auto head = readPlayhead (nHost);
+
+    auto main = getBusBuffer (buffer, false, 0);
+    float* mainL = main.getNumChannels() > 0 ? main.getWritePointer (0) : scratch.getWritePointer (0);
+    float* mainR = main.getNumChannels() > 1 ? main.getWritePointer (1)
+                                             : (main.getNumChannels() > 0 ? main.getWritePointer (0)
+                                                                          : scratch.getWritePointer (0));
+
+    float* auxPtr[kAuxBuses];
+    float* hostOut[kTotalCh];
+    hostOut[0] = mainL;
+    hostOut[1] = mainR;
+
+    auto attachAux = [&] (int i, float*& dest)
+    {
+        auto bus = getBusBuffer (buffer, false, i + 1);
+        dest = bus.getNumChannels() > 0 ? bus.getWritePointer (0) : scratch.getWritePointer (0);
+    };
+
+    if (exact44100)
+    {
+        for (int i = 0; i < kAuxBuses; ++i)
+            attachAux (i, auxPtr[i]);
+        orb_modloader_process (engine_.get(), mainL, mainR, auxPtr, nHost, &params, &head);
+        return;
+    }
+
+    const int nEngine = juce::jlimit (
+        0, engineBuf.getNumSamples(),
+        (int) std::ceil ((double) nHost * kEngineRate / hostRate) + 4);
+
+    float* engAux[kAuxBuses];
+    for (int i = 0; i < kAuxBuses; ++i)
+    {
+        engAux[i] = engineBuf.getWritePointer (i + 2);
+        auto bus = getBusBuffer (buffer, false, i + 1);
+        hostOut[i + 2] = bus.getNumChannels() > 0 ? bus.getWritePointer (0) : nullptr;
+    }
+    if (nEngine > 0)
+        orb_modloader_process (engine_.get(), engineBuf.getWritePointer (0), engineBuf.getWritePointer (1),
+                               engAux, nEngine, &params, &head);
+
+    engineToHost (hostOut, nHost, nEngine, kTotalCh);
+}
+
+void ModloaderProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
+{
+    juce::ignoreUnused (midi);
+    processBuffer (buffer, false);
+}
+
+void ModloaderProcessor::processBlockBypassed (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
+{
+    juce::ignoreUnused (midi);
+    processBuffer (buffer, true);
+}
+
+juce::AudioProcessorEditor* ModloaderProcessor::createEditor()
+{
+    return new ModloaderEditor (*this);
+}
+
+void ModloaderProcessor::getStateInformation (juce::MemoryBlock& destData)
+{
+    auto xml = apvts.copyState().createXml();
+    if (xml == nullptr)
+        return;
+
+    if (engine_)
+    {
+        std::vector<uint8_t> pat (kPatternBytes);
+        if (orb_modloader_get_patterns (engine_.get(), 0, pat.data(), (int) pat.size()) > 0)
+            xml->setAttribute ("pat808", juce::Base64::toBase64 (pat.data(), pat.size()));
+        if (orb_modloader_get_patterns (engine_.get(), 1, pat.data(), (int) pat.size()) > 0)
+            xml->setAttribute ("pat909", juce::Base64::toBase64 (pat.data(), pat.size()));
+
+        char buf[1024] {};
+        orb_modloader_mods_folder (engine_.get(), buf, (int) sizeof buf);
+        xml->setAttribute ("modsFolder", juce::String::fromUTF8 (buf));
+        orb_modloader_dat_path (engine_.get(), buf, (int) sizeof buf);
+        xml->setAttribute ("datPath", juce::String::fromUTF8 (buf));
+        xml->setAttribute ("modIndex", orb_modloader_current_mod (engine_.get()));
+        orb_modloader_mod_path (engine_.get(), orb_modloader_current_mod (engine_.get()), buf, (int) sizeof buf);
+        xml->setAttribute ("modPath", juce::String::fromUTF8 (buf));
+    }
+
+    copyXmlToBinary (*xml, destData);
+}
+
+void ModloaderProcessor::setStateInformation (const void* data, int sizeInBytes)
+{
+    auto xml = getXmlFromBinary (data, sizeInBytes);
+    if (xml == nullptr || !xml->hasTagName (apvts.state.getType()))
+        return;
+
+    apvts.replaceState (juce::ValueTree::fromXml (*xml));
+    if (engine_ == nullptr)
+        return;
+
+    auto decodePat = [this, &xml] (const char* attr, int machine)
+    {
+        const auto b64 = xml->getStringAttribute (attr);
+        if (b64.isEmpty())
+            return;
+        juce::MemoryOutputStream out;
+        if (juce::Base64::convertFromBase64 (out, b64))
+            orb_modloader_set_patterns (engine_.get(), machine, (const uint8_t*) out.getData(), (int) out.getDataSize());
+    };
+    decodePat ("pat808", 0);
+    decodePat ("pat909", 1);
+
+    const auto folder = xml->getStringAttribute ("modsFolder");
+    if (folder.isNotEmpty())
+        setModsFolder (folder);
+
+    const auto dat = xml->getStringAttribute ("datPath");
+    if (dat.isNotEmpty())
+        setKeyPath (dat);
+
+    const auto modPath = xml->getStringAttribute ("modPath");
+    const int index = xml->getIntAttribute ("modIndex", 0);
+    if (modPath.isNotEmpty())
+    {
+        const int n = orb_modloader_mod_count (engine_.get());
+        char buf[1024];
+        bool loaded = false;
+        for (int i = 0; i < n; ++i)
+        {
+            orb_modloader_mod_path (engine_.get(), i, buf, (int) sizeof buf);
+            if (modPath == juce::String::fromUTF8 (buf))
+            {
+                orb_modloader_load (engine_.get(), i);
+                loaded = true;
+                break;
+            }
+        }
+        if (!loaded)
+            orb_modloader_load (engine_.get(), index);
+    }
+    else
+    {
+        orb_modloader_load (engine_.get(), index);
+    }
+}
+
+juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
+{
+    return new ModloaderProcessor();
+}

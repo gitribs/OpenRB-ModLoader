@@ -1,0 +1,11 @@
+/target/
+/build/
+/output/
+/cmake-build-*/
+/.idea/
+/.vscode/
+/.DS_Store
+CMakeUserPresets.json
+*.user
+*.rsuser
+*.pdb

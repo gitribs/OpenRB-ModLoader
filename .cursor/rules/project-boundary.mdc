@@ -1,0 +1,13 @@
+---
+description: Never change files outside this project directory
+alwaysApply: true
+---
+
+# Project boundary
+
+Do not create, edit, delete, install, or otherwise change anything outside this project directory (`openrb-modloader`).
+
+- No copies into `~/Library/Audio/Plug-Ins` or any other system location.
+- Built VST3, AU, and standalone go to the project `output/` folder. `COPY_PLUGIN_AFTER_BUILD` may be TRUE only when copy dirs are under that folder.
+- Do not modify `openrb-338` or any other sibling project.
+- Do not write to home-directory config, global toolchains, or user Library folders as part of this project.

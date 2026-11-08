@@ -1,0 +1,13 @@
+[package]
+name = "rbm"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+publish = false
+
+[dependencies]
+orb-engine = { path = "../orb-engine" }
+# mod.toml of an unpacked mod (rbm::pack).
+toml = "=0.9.12"
+# The SHA-256 of RB20FUL.DAT (rbm::dat) and the gated check of the embedded bytes.
+sha2 = "0.10"
