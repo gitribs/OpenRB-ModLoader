@@ -84,6 +84,19 @@ private:
     bool isUp;
 };
 
+class SettingsButton final : public juce::Button
+{
+public:
+    SettingsButton();
+    void paintButton (juce::Graphics&, bool highlighted, bool down) override;
+    void mouseDown (const juce::MouseEvent&) override;
+    void mouseUp (const juce::MouseEvent&) override;
+    void setAttention (bool shouldAttention);
+
+private:
+    bool attention = false;
+};
+
 class ModloaderEditor final : public juce::AudioProcessorEditor,
                               private juce::Timer
 {
@@ -125,6 +138,14 @@ private:
     void chooseModsFolder();
     void applyPickedMod (const juce::File&);
     void chooseDat();
+    void applyDatFile (const juce::File&);
+    void toggleSettings();
+    void showSettings (bool locateDat);
+    void hideSettings();
+    void presentSettings (bool locateDat);
+    bool statusNeedsDat() const;
+    juce::String datLocateMessage() const;
+    void promptForDatIfNeeded();
     void showContextMenu();
     void resetDevice();
     void editCut();
@@ -145,7 +166,7 @@ private:
 
     juce::Label title, modName, status, shuffleN, flamN;
     IncDecArrowButton modUp { true }, modDown { false };
-    ModTextButton folderBtn { "MOD" }, datBtn { "DAT" };
+    SettingsButton settingsBtn;
     ModSlider shuffle;
     juce::AudioProcessorValueTreeState::SliderAttachment shuffleA;
     ModToggleButton shuffleOn;
@@ -214,8 +235,11 @@ private:
     FocusListener focusListener { *this };
 
     class ModPicker;
+    class SettingsPanel;
     std::unique_ptr<ModPicker> modPicker;
+    std::unique_ptr<SettingsPanel> settingsPanel;
     std::unique_ptr<juce::FileChooser> chooser;
+    bool fileChooserOpen = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ModloaderEditor)
 };

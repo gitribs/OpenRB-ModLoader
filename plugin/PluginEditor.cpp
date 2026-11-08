@@ -1,6 +1,7 @@
 #include "PluginEditor.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 namespace
@@ -290,6 +291,69 @@ void IncDecArrowButton::mouseUp (const juce::MouseEvent& e)
         juce::Button::mouseUp (e);
 }
 
+SettingsButton::SettingsButton() : juce::Button ({}) {}
+
+void SettingsButton::setAttention (bool shouldAttention)
+{
+    if (attention == shouldAttention)
+        return;
+    attention = shouldAttention;
+    repaint();
+}
+
+void SettingsButton::paintButton (juce::Graphics& g, bool highlighted, bool down)
+{
+    auto r = getLocalBounds().toFloat().reduced (0.5f);
+    g.setColour (kWell);
+    g.fillRoundedRectangle (r, 2.0f);
+    const bool lit = highlighted || down || attention;
+    g.setColour (lit ? kAmber : kLine);
+    g.drawRoundedRectangle (r, 2.0f, 1.0f);
+
+    const auto c = r.getCentre();
+    const float radius = juce::jmin (r.getWidth(), r.getHeight()) * 0.28f;
+    const float inner = radius * 0.62f;
+    const float hole = radius * 0.32f;
+    constexpr int teeth = 8;
+    juce::Path gear;
+    for (int i = 0; i < teeth; ++i)
+    {
+        const float step = juce::MathConstants<float>::twoPi / (float) teeth;
+        const float a = (float) i * step - juce::MathConstants<float>::halfPi;
+        const float a0 = a - step * 0.16f;
+        const float a1 = a + step * 0.16f;
+        const float b0 = a + step * 0.34f;
+        const float b1 = a + step * 0.66f;
+        auto pt = [c] (float ang, float rad)
+        {
+            return juce::Point<float> (c.x + std::cos (ang) * rad, c.y + std::sin (ang) * rad);
+        };
+        if (i == 0)
+            gear.startNewSubPath (pt (a0, radius));
+        gear.lineTo (pt (a0, radius));
+        gear.lineTo (pt (a1, radius));
+        gear.lineTo (pt (b0, inner));
+        gear.lineTo (pt (b1, inner));
+    }
+    gear.closeSubPath();
+    gear.setUsingNonZeroWinding (false);
+    gear.addEllipse (c.x - hole, c.y - hole, hole * 2.0f, hole * 2.0f);
+    g.setColour (down || attention ? kAmber : kText);
+    g.fillPath (gear);
+}
+
+void SettingsButton::mouseDown (const juce::MouseEvent& e)
+{
+    if (! e.mods.isPopupMenu())
+        juce::Button::mouseDown (e);
+}
+
+void SettingsButton::mouseUp (const juce::MouseEvent& e)
+{
+    if (! e.mods.isPopupMenu())
+        juce::Button::mouseUp (e);
+}
+
 class ModloaderEditor::ModPicker final : public juce::Component,
                                         public juce::ListBoxModel
 {
@@ -415,7 +479,7 @@ public:
     bool canModalEventBeSentToComponent (const juce::Component* target) override
     {
         return target == &owner.modName || target == &owner.modUp || target == &owner.modDown
-            || target == &owner.folderBtn || target == &owner.datBtn;
+            || target == &owner.settingsBtn;
     }
 
 private:
@@ -432,6 +496,194 @@ private:
     juce::ListBox list;
     juce::StringArray mods;
     int current = 0;
+};
+
+class ModloaderEditor::SettingsPanel final : public juce::Component
+{
+public:
+    explicit SettingsPanel (ModloaderEditor& o, bool locate) : owner (o), locateDat (locate)
+    {
+        setWantsKeyboardFocus (true);
+        setOpaque (false);
+
+        auto setupLabel = [this] (juce::Label& l, const juce::String& t, juce::Colour c, float h, bool bold)
+        {
+            l.setText (t, juce::dontSendNotification);
+            l.setColour (juce::Label::textColourId, c);
+            l.setFont (bold ? juce::Font { juce::FontOptions().withHeight (h).withStyle ("Bold") }
+                            : juce::Font { juce::FontOptions (h) });
+            l.setJustificationType (juce::Justification::centredLeft);
+            addAndMakeVisible (l);
+        };
+
+        setupLabel (title, "Settings", kAmber, 16.0f, true);
+        setupLabel (message, {}, kAmber, 13.0f, false);
+        message.setJustificationType (juce::Justification::topLeft);
+        message.setMinimumHorizontalScale (1.0f);
+        message.setVisible (false);
+        setupLabel (filesHeading, "File Locations", kMuted, 12.0f, true);
+        setupLabel (modsCaption, "Mods Folder", kText, 12.0f, false);
+        setupLabel (datCaption, "DAT / ISO", kText, 12.0f, false);
+
+        auto setupPath = [this] (juce::Label& l)
+        {
+            l.setColour (juce::Label::backgroundColourId, kWell);
+            l.setColour (juce::Label::outlineColourId, kLine);
+            l.setColour (juce::Label::textColourId, kText);
+            l.setFont (juce::FontOptions (12.0f));
+            l.setJustificationType (juce::Justification::centredLeft);
+            l.setBorderSize ({ 0, 8, 0, 8 });
+            l.setMinimumHorizontalScale (0.7f);
+            addAndMakeVisible (l);
+        };
+        setupPath (modsPath);
+        setupPath (datPath);
+
+        auto setupBtn = [this] (juce::TextButton& b, const juce::String& t)
+        {
+            b.setButtonText (t);
+            b.setColour (juce::TextButton::buttonColourId, kWell);
+            b.getProperties().set ("headerBtn", true);
+            addAndMakeVisible (b);
+        };
+        setupBtn (closeBtn, juce::String::fromUTF8 ("\xc3\x97"));
+        setupBtn (modsBtn, "Choose...");
+        setupBtn (datBtn, "Choose...");
+        closeBtn.onClick = [this] { owner.hideSettings(); };
+        modsBtn.onClick = [this] { owner.chooseModsFolder(); };
+        datBtn.onClick = [this] { owner.chooseDat(); };
+        refresh();
+    }
+
+    void setLocateDat (bool shouldLocate)
+    {
+        locateDat = shouldLocate;
+        refresh();
+    }
+
+    void refresh()
+    {
+        auto* e = owner.eng();
+        char folder[1024] {};
+        char dat[1024] {};
+        if (e != nullptr)
+        {
+            orb_modloader_mods_folder (e, folder, (int) sizeof folder);
+            orb_modloader_dat_path (e, dat, (int) sizeof dat);
+        }
+        setPathText (modsPath, juce::String::fromUTF8 (folder));
+        setPathText (datPath, juce::String::fromUTF8 (dat));
+        datPath.setColour (juce::Label::outlineColourId, locateDat ? kAmber : kLine);
+
+        if (locateDat)
+        {
+            message.setText (owner.datLocateMessage(), juce::dontSendNotification);
+            message.setVisible (true);
+        }
+        else
+        {
+            message.setText ({}, juce::dontSendNotification);
+            message.setVisible (false);
+        }
+        resized();
+        repaint();
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        g.setColour (juce::Colours::black.withAlpha (0.55f));
+        g.fillRect (getLocalBounds());
+        auto card = cardBounds().toFloat();
+        g.setColour (kPanel);
+        g.fillRoundedRectangle (card, 8.0f);
+        g.setColour (kLine);
+        g.drawRoundedRectangle (card, 8.0f, 1.0f);
+    }
+
+    void resized() override
+    {
+        auto r = cardBounds().reduced (20, 16);
+        auto titleRow = r.removeFromTop (24);
+        closeBtn.setBounds (titleRow.removeFromRight (24).reduced (1));
+        title.setBounds (titleRow);
+        r.removeFromTop (12);
+        if (message.isVisible())
+        {
+            message.setBounds (r.removeFromTop (48));
+            r.removeFromTop (12);
+        }
+        filesHeading.setBounds (r.removeFromTop (18));
+        r.removeFromTop (8);
+        layoutFileRow (r, modsCaption, modsPath, modsBtn);
+        r.removeFromTop (10);
+        layoutFileRow (r, datCaption, datPath, datBtn);
+    }
+
+    void mouseDown (const juce::MouseEvent& e) override
+    {
+        if (! cardBounds().contains (e.getPosition()) && ! owner.fileChooserOpen)
+            owner.hideSettings();
+    }
+
+    bool keyPressed (const juce::KeyPress& key) override
+    {
+        if (key == juce::KeyPress::escapeKey)
+        {
+            owner.hideSettings();
+            return true;
+        }
+        return false;
+    }
+
+    void inputAttemptWhenModal() override
+    {
+        if (! owner.fileChooserOpen)
+            owner.hideSettings();
+    }
+
+    bool canModalEventBeSentToComponent (const juce::Component* target) override
+    {
+        return target == &owner.settingsBtn;
+    }
+
+private:
+    juce::Rectangle<int> cardBounds() const
+    {
+        const int h = message.isVisible() ? 268 : 216;
+        return getLocalBounds().withSizeKeepingCentre (kCardW, h);
+    }
+
+    static void layoutFileRow (juce::Rectangle<int>& r, juce::Label& caption, juce::Label& path,
+                               juce::TextButton& btn)
+    {
+        caption.setBounds (r.removeFromTop (16));
+        r.removeFromTop (4);
+        auto row = r.removeFromTop (28);
+        btn.setBounds (row.removeFromRight (88).reduced (0, 1));
+        row.removeFromRight (8);
+        path.setBounds (row);
+    }
+
+    static void setPathText (juce::Label& l, const juce::String& path)
+    {
+        if (path.isEmpty())
+        {
+            l.setText ("Not set", juce::dontSendNotification);
+            l.setColour (juce::Label::textColourId, kMuted);
+            l.setTooltip ({});
+            return;
+        }
+        l.setText (path, juce::dontSendNotification);
+        l.setColour (juce::Label::textColourId, kText);
+        l.setTooltip (path);
+    }
+
+    static constexpr int kCardW = 460;
+    ModloaderEditor& owner;
+    juce::Label title, message, filesHeading;
+    juce::Label modsCaption, modsPath, datCaption, datPath;
+    ModTextButton closeBtn, modsBtn, datBtn;
+    bool locateDat = false;
 };
 
 void StepLed::setOn (bool shouldBeOn)
@@ -671,16 +923,11 @@ ModloaderEditor::ModloaderEditor (ModloaderProcessor& p)
 
     addAndMakeVisible (modUp);
     addAndMakeVisible (modDown);
-    for (auto* b : { &folderBtn, &datBtn })
-    {
-        b->setColour (juce::TextButton::buttonColourId, kWell);
-        b->getProperties().set ("headerBtn", true);
-        addAndMakeVisible (b);
-    }
+    addAndMakeVisible (settingsBtn);
+    settingsBtn.setTooltip ("Settings");
     modDown.onClick = [this] { loadMod (-1); };
     modUp.onClick = [this] { loadMod (1); };
-    folderBtn.onClick = [this] { chooseModsFolder(); };
-    datBtn.onClick = [this] { chooseDat(); };
+    settingsBtn.onClick = [this] { toggleSettings(); };
 
     setupKnob (shuffle, false);
     shuffleOn.setClickingTogglesState (true);
@@ -713,12 +960,20 @@ ModloaderEditor::ModloaderEditor (ModloaderProcessor& p)
     refreshSteps();
     resized();
     startTimerHz (30);
+
+    juce::Component::SafePointer<ModloaderEditor> safe (this);
+    juce::MessageManager::callAsync ([safe]
+    {
+        if (safe != nullptr)
+            safe->promptForDatIfNeeded();
+    });
 }
 
 ModloaderEditor::~ModloaderEditor()
 {
     juce::PopupMenu::dismissAllActiveMenus();
     hideModPicker();
+    hideSettings();
     stopTimer();
     removeMouseListener (&focusListener);
     setLookAndFeel (nullptr);
@@ -1061,6 +1316,7 @@ void ModloaderEditor::refreshModLabel()
     modName.setText (juce::String::fromUTF8 (buf), juce::dontSendNotification);
     orb_modloader_status (e, buf, (int) sizeof buf);
     status.setText (juce::String::fromUTF8 (buf), juce::dontSendNotification);
+    settingsBtn.setAttention (statusNeedsDat());
     if (modPicker != nullptr)
         modPicker->syncSelection (index);
 }
@@ -1108,6 +1364,8 @@ void ModloaderEditor::loadModIndex (int index)
     orb_modloader_load (e, juce::jlimit (0, n - 1, index));
     refreshModLabel();
     refreshSplash();
+    if (statusNeedsDat())
+        showSettings (true);
 }
 
 void ModloaderEditor::handleNestedMouseDown (const juce::MouseEvent& e)
@@ -1197,6 +1455,10 @@ void ModloaderEditor::applyPickedMod (const juce::File& f)
     hideModPicker();
     refreshModLabel();
     refreshSplash();
+    if (statusNeedsDat())
+        showSettings (true);
+    else if (settingsPanel != nullptr)
+        settingsPanel->refresh();
 }
 
 void ModloaderEditor::chooseModsFolder()
@@ -1214,6 +1476,7 @@ void ModloaderEditor::chooseModsFolder()
     if (!start.existsAsFile())
         start = juce::File (folder);
 
+    fileChooserOpen = true;
     chooser = std::make_unique<juce::FileChooser> (
         "ReBirth mod (.rbm) or Mods folder", start, "*.rbm;*.RBM");
     chooser->launchAsync (juce::FileBrowserComponent::openMode
@@ -1221,6 +1484,7 @@ void ModloaderEditor::chooseModsFolder()
                               | juce::FileBrowserComponent::canSelectDirectories,
                           [this] (const juce::FileChooser& fc)
                           {
+                              fileChooserOpen = false;
                               applyPickedMod (fc.getResult());
                           });
 }
@@ -1250,20 +1514,104 @@ void ModloaderEditor::chooseDat()
             start = mods.getParentDirectory();
     }
 
+    fileChooserOpen = true;
     chooser = std::make_unique<juce::FileChooser> (
         "RB20FUL.DAT or ReBirth 2.x CD image", start, "*.DAT;*.dat;*.iso;*.ISO;*.cdr;*.CDR");
     chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
                           [this] (const juce::FileChooser& fc)
                           {
-                              auto f = fc.getResult();
-                              auto* engine = eng();
-                              if (!f.existsAsFile() || engine == nullptr)
-                                  return;
-                              proc.setKeyPath (f.getFullPathName());
-                              orb_modloader_load (engine, orb_modloader_current_mod (engine));
-                              refreshModLabel();
-                              refreshSplash();
+                              fileChooserOpen = false;
+                              applyDatFile (fc.getResult());
                           });
+}
+
+void ModloaderEditor::applyDatFile (const juce::File& f)
+{
+    auto* engine = eng();
+    if (! f.existsAsFile() || engine == nullptr)
+        return;
+    proc.setKeyPath (f.getFullPathName());
+    orb_modloader_load (engine, orb_modloader_current_mod (engine));
+    refreshModLabel();
+    refreshSplash();
+    if (settingsPanel != nullptr)
+        settingsPanel->setLocateDat (statusNeedsDat());
+}
+
+void ModloaderEditor::toggleSettings()
+{
+    if (settingsPanel != nullptr)
+        hideSettings();
+    else
+        showSettings (statusNeedsDat());
+}
+
+void ModloaderEditor::showSettings (bool locateDat)
+{
+    hideModPicker();
+    if (settingsPanel != nullptr)
+    {
+        settingsPanel->setLocateDat (locateDat);
+        return;
+    }
+    juce::Component::SafePointer<ModloaderEditor> safe (this);
+    juce::MessageManager::callAsync ([safe, locateDat]
+    {
+        if (safe != nullptr)
+            safe->presentSettings (locateDat);
+    });
+}
+
+void ModloaderEditor::presentSettings (bool locateDat)
+{
+    if (settingsPanel != nullptr)
+    {
+        settingsPanel->setLocateDat (locateDat);
+        return;
+    }
+    settingsPanel = std::make_unique<SettingsPanel> (*this, locateDat);
+    addAndMakeVisible (*settingsPanel);
+    settingsPanel->setBounds (getLocalBounds());
+    settingsPanel->toFront (true);
+    settingsPanel->enterModalState (true, nullptr, false);
+    settingsPanel->grabKeyboardFocus();
+}
+
+void ModloaderEditor::hideSettings()
+{
+    if (settingsPanel == nullptr)
+        return;
+    auto panel = std::move (settingsPanel);
+    if (panel->isCurrentlyModal())
+        panel->exitModalState (0);
+}
+
+bool ModloaderEditor::statusNeedsDat() const
+{
+    auto* e = proc.engine();
+    if (e == nullptr)
+        return false;
+    char buf[256] {};
+    orb_modloader_status (e, buf, (int) sizeof buf);
+    return juce::String::fromUTF8 (buf) == "needs DAT/ISO";
+}
+
+juce::String ModloaderEditor::datLocateMessage() const
+{
+    auto* e = proc.engine();
+    char path[1024] {};
+    if (e != nullptr)
+        orb_modloader_dat_path (e, path, (int) sizeof path);
+    const juce::File previous (juce::String::fromUTF8 (path));
+    if (path[0] != 0 && ! previous.existsAsFile())
+        return "The DAT/ISO file is missing from its previous location.\nLocate RB20FUL.DAT or a ReBirth 2.x CD image.";
+    return "This mod requires RB20FUL.DAT or a ReBirth 2.x CD image.\nLocate the file to continue.";
+}
+
+void ModloaderEditor::promptForDatIfNeeded()
+{
+    if (statusNeedsDat())
+        showSettings (true);
 }
 
 int ModloaderEditor::focusedDrum() const
@@ -1604,16 +1952,9 @@ void ModloaderEditor::resized()
     modUp.setBounds (arrows.removeFromTop (arrows.getHeight() / 2).reduced (1, 0));
     modDown.setBounds (arrows.reduced (1, 0));
     top.removeFromLeft (8);
-    auto placeHeaderBtn = [this, &top, bandY, bandH] (juce::TextButton& b)
-    {
-        const auto font = lnf.getTextButtonFont (b, bandH);
-        const int w = juce::GlyphArrangement::getStringWidthInt (font, b.getButtonText()) + 18;
-        b.setBounds (top.removeFromLeft (w).withY (bandY).withHeight (bandH).reduced (1, 0));
-    };
-    placeHeaderBtn (folderBtn);
-    top.removeFromLeft (2);
-    placeHeaderBtn (datBtn);
-    status.setBounds (top.removeFromLeft (180));
+    settingsBtn.setBounds (top.removeFromLeft (bandH).withY (bandY).withHeight (bandH).reduced (1, 0));
+    top.removeFromLeft (8);
+    status.setBounds (top.removeFromLeft (220));
     shuffle.setBounds (top.removeFromRight (40).reduced (0, 2));
     constexpr int shuffleTick = 22;
     shuffleOn.setBounds (top.removeFromRight (shuffleTick).withSizeKeepingCentre (shuffleTick, shuffleTick));
@@ -1823,4 +2164,7 @@ void ModloaderEditor::resized()
 
     placeSlotsAndSequencer (legend909, step909, led909, disable909, slot909,
                             y909, contentBottom909, false);
+
+    if (settingsPanel != nullptr)
+        settingsPanel->setBounds (getLocalBounds());
 }

@@ -30,14 +30,16 @@ Default scan folder:
 /Library/Application Support/Propellerhead/Rebirth RB-338/Mods/
 ```
 
-Override with `ORB_MOD_DIR`, or pick a folder in the editor. Item 0 is always **Standard ReBirth**
-(the embedded kit), so the plugin works with an empty Mods folder.
+Override with `ORB_MOD_DIR`, or pick a folder in Settings (gear icon). Item 0 is always
+**Standard ReBirth** (the embedded kit), so the plugin works with an empty Mods folder.
 
 - Recrypted `.rbm` files load with the embedded key window (no DAT).
 - Original `.rbm` files need `RB20FUL.DAT` from a ReBirth 2.x install, or a 2048-byte-sector
-  ISO of that CD (the usual ReBirth 2.x disc image). **DAT…** accepts `*.DAT` and `*.iso`.
-  `ORB_RB20FUL` may point at either. The plugin finds `RB20FUL.DAT` in the image and reads
-  only two 2 KB pages; the 128 MB file is not extracted or copied.
+  ISO of that CD (the usual ReBirth 2.x disc image). Settings **File Locations** accepts
+  `*.DAT` and `*.iso`. `ORB_RB20FUL` may point at either. The plugin finds `RB20FUL.DAT` in
+  the image and reads only two 2 KB pages; the 128 MB file is not extracted or copied.
+  If you scroll to a kit that needs the DAT/ISO and it is unset or the previous file was
+  moved, Settings opens and asks you to locate it.
 - The chosen DAT/ISO path and mods folder are kept while the plugin instance is alive
   (changing mods reuses them), stored in the project as `datPath` and `modsFolder` (restored
   on reload), and remembered in `~/Library/Application Support/OpenRB/Modloader.keypath` and

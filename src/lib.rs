@@ -727,7 +727,7 @@ impl Modloader {
                 1
             }
             Err(msg) => {
-                // Keep the list selection on the failed kit so DAT… can retry it.
+                // Keep the list selection on the failed kit so Settings can retry it.
                 // Samples stay on the previous kit.
                 self.current = i;
                 self.status = msg;
