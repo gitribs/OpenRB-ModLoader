@@ -164,6 +164,24 @@ void ModloaderProcessor::setModsFolder (const juce::String& path)
     saveRememberedPath (kModsFolderFile, path);
 }
 
+void ModloaderProcessor::resetDevice()
+{
+    for (auto* param : getParameters())
+        if (auto* ranged = dynamic_cast<juce::RangedAudioParameter*> (param))
+            ranged->setValueNotifyingHost (ranged->getDefaultValue());
+
+    std::array<uint8_t, kPatternBytes> empty {};
+    for (int p = 0; p < 32; ++p)
+        empty[(size_t) (p * kPatternLen + 1)] = 16;
+
+    if (engine_)
+    {
+        orb_modloader_set_patterns (engine_.get(), 0, empty.data(), kPatternBytes);
+        orb_modloader_set_patterns (engine_.get(), 1, empty.data(), kPatternBytes);
+        orb_modloader_reset (engine_.get());
+    }
+}
+
 ModloaderProcessor::~ModloaderProcessor() = default;
 
 juce::AudioProcessorValueTreeState::ParameterLayout ModloaderProcessor::createLayout()

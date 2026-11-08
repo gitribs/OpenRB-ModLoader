@@ -13,6 +13,14 @@ class ModloaderProcessor final : public juce::AudioProcessor
 public:
     static constexpr int kAuxBuses = ORB_MODLOADER_AUX;
     static constexpr int kPatternBytes = ORB_MODLOADER_PATTERN_BYTES;
+    static constexpr int kPatternLen = kPatternBytes / 32;
+
+    struct PatternClipboard
+    {
+        bool valid = false;
+        int machine = -1;
+        std::array<uint8_t, kPatternLen> bytes {};
+    };
 
     ModloaderProcessor();
     ~ModloaderProcessor() override;
@@ -48,8 +56,11 @@ public:
     void setKeyPath (const juce::String& path);
     /// Remember a mods folder for this instance and later ones.
     void setModsFolder (const juce::String& path);
+    /// Restore default parameters and empty patterns, as a newly created instance.
+    void resetDevice();
 
     juce::AudioProcessorValueTreeState apvts;
+    PatternClipboard patternClip;
     OrbModloader* engine() noexcept { return engine_.get(); }
 
     static const char* auxName (int index);

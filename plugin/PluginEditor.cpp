@@ -1,5 +1,8 @@
 #include "PluginEditor.h"
 
+#include <algorithm>
+#include <cstring>
+
 namespace
 {
 const juce::Colour kBg { 0xff161618 };
@@ -105,6 +108,73 @@ int mixBusFor909 (int col)
     return 11 + (col - 1);
 }
 
+constexpr int kPatLen = ModloaderProcessor::kPatternLen;
+constexpr int kSteps = 16;
+constexpr int kCols = 12;
+constexpr int k909CH = 8;
+constexpr int k909OH = 9;
+
+uint8_t& patCell (uint8_t* p, int step, int col)
+{
+    return p[2 + kCols * step + col];
+}
+
+void clearSteps (uint8_t* p)
+{
+    std::memset (p + 2, 0, (size_t) (kPatLen - 2));
+}
+
+void shiftColumn (uint8_t* p, int col, bool right)
+{
+    if (right)
+    {
+        const auto last = patCell (p, kSteps - 1, col);
+        for (int s = kSteps - 1; s > 0; --s)
+            patCell (p, s, col) = patCell (p, s - 1, col);
+        patCell (p, 0, col) = last;
+        return;
+    }
+    const auto first = patCell (p, 0, col);
+    for (int s = 0; s < kSteps - 1; ++s)
+        patCell (p, s, col) = patCell (p, s + 1, col);
+    patCell (p, kSteps - 1, col) = first;
+}
+
+uint8_t randomCell (bool is909, int col, juce::Random& rng)
+{
+    if (! is909)
+        return (uint8_t) rng.nextInt (2);
+    if (col == 0)
+        return rng.nextInt (2) != 0 ? (uint8_t) 2 : 0;
+    return (uint8_t) rng.nextInt (4);
+}
+
+void shuffleColumn (uint8_t* p, int col, juce::Random& rng)
+{
+    uint8_t v[kSteps];
+    for (int s = 0; s < kSteps; ++s)
+        v[s] = patCell (p, s, col);
+    for (int i = kSteps - 1; i > 0; --i)
+        std::swap (v[i], v[rng.nextInt (i + 1)]);
+    for (int s = 0; s < kSteps; ++s)
+        patCell (p, s, col) = v[s];
+}
+
+void exclusiveHats (uint8_t* p, int preferCol)
+{
+    for (int s = 0; s < kSteps; ++s)
+    {
+        auto& ch = patCell (p, s, k909CH);
+        auto& oh = patCell (p, s, k909OH);
+        if (ch == 0 || oh == 0)
+            continue;
+        if (preferCol == k909CH)
+            oh = 0;
+        else
+            ch = 0;
+    }
+}
+
 int toggleContentWidth (const juce::ToggleButton& button, int height)
 {
     const bool radio = (bool) button.getProperties()["radio"];
@@ -118,6 +188,48 @@ int toggleContentWidth (const juce::ToggleButton& button, int height)
     return juce::roundToInt (tickWidth) + textW + 16;
 }
 } // namespace
+
+void ModSlider::mouseDown (const juce::MouseEvent& e)
+{
+    if (! e.mods.isPopupMenu())
+        juce::Slider::mouseDown (e);
+}
+
+void ModSlider::mouseDrag (const juce::MouseEvent& e)
+{
+    if (! e.mods.isPopupMenu())
+        juce::Slider::mouseDrag (e);
+}
+
+void ModSlider::mouseUp (const juce::MouseEvent& e)
+{
+    if (! e.mods.isPopupMenu())
+        juce::Slider::mouseUp (e);
+}
+
+void ModTextButton::mouseDown (const juce::MouseEvent& e)
+{
+    if (! e.mods.isPopupMenu())
+        juce::TextButton::mouseDown (e);
+}
+
+void ModTextButton::mouseUp (const juce::MouseEvent& e)
+{
+    if (! e.mods.isPopupMenu())
+        juce::TextButton::mouseUp (e);
+}
+
+void ModToggleButton::mouseDown (const juce::MouseEvent& e)
+{
+    if (! e.mods.isPopupMenu())
+        juce::ToggleButton::mouseDown (e);
+}
+
+void ModToggleButton::mouseUp (const juce::MouseEvent& e)
+{
+    if (! e.mods.isPopupMenu())
+        juce::ToggleButton::mouseUp (e);
+}
 
 IncDecArrowButton::IncDecArrowButton (bool up) : juce::Button ({}), isUp (up) {}
 
@@ -140,6 +252,18 @@ void IncDecArrowButton::paintButton (juce::Graphics& g, bool highlighted, bool d
 
     g.setColour (down ? kAmber : kText);
     g.fillPath (p);
+}
+
+void IncDecArrowButton::mouseDown (const juce::MouseEvent& e)
+{
+    if (! e.mods.isPopupMenu())
+        juce::Button::mouseDown (e);
+}
+
+void IncDecArrowButton::mouseUp (const juce::MouseEvent& e)
+{
+    if (! e.mods.isPopupMenu())
+        juce::Button::mouseUp (e);
 }
 
 void StepLed::setOn (bool shouldBeOn)
@@ -197,6 +321,18 @@ void StepButton::paintButton (juce::Graphics& g, bool, bool)
     g.fillRoundedRectangle (r, 3.0f);
 }
 
+void StepButton::mouseDown (const juce::MouseEvent& e)
+{
+    if (! e.mods.isPopupMenu())
+        juce::TextButton::mouseDown (e);
+}
+
+void StepButton::mouseUp (const juce::MouseEvent& e)
+{
+    if (! e.mods.isPopupMenu())
+        juce::TextButton::mouseUp (e);
+}
+
 ModloaderLookAndFeel::ModloaderLookAndFeel()
 {
     setColour (juce::Slider::textBoxTextColourId, kText);
@@ -209,6 +345,11 @@ ModloaderLookAndFeel::ModloaderLookAndFeel()
     setColour (juce::TextButton::buttonColourId, kWell);
     setColour (juce::TextButton::textColourOffId, kText);
     setColour (juce::TextButton::textColourOnId, kAmber);
+    setColour (juce::PopupMenu::backgroundColourId, kPanel);
+    setColour (juce::PopupMenu::textColourId, kText);
+    setColour (juce::PopupMenu::headerTextColourId, kMuted);
+    setColour (juce::PopupMenu::highlightedBackgroundColourId, kAmber);
+    setColour (juce::PopupMenu::highlightedTextColourId, kBg);
 }
 
 void ModloaderLookAndFeel::drawRotarySlider (juce::Graphics& g, int x, int y, int width, int height,
@@ -316,6 +457,18 @@ juce::Font ModloaderLookAndFeel::getLabelFont (juce::Label& label)
     return label.getFont();
 }
 
+juce::Font ModloaderLookAndFeel::getPopupMenuFont()
+{
+    return withDefaultMetrics (juce::FontOptions (13.0f));
+}
+
+void ModloaderLookAndFeel::drawPopupMenuBackground (juce::Graphics& g, int width, int height)
+{
+    g.fillAll (kPanel);
+    g.setColour (kLine);
+    g.drawRect (0, 0, width, height, 1);
+}
+
 ModloaderEditor::ModloaderEditor (ModloaderProcessor& p)
     : AudioProcessorEditor (&p),
       proc (p),
@@ -381,6 +534,7 @@ ModloaderEditor::ModloaderEditor (ModloaderProcessor& p)
 
 ModloaderEditor::~ModloaderEditor()
 {
+    juce::PopupMenu::dismissAllActiveMenus();
     stopTimer();
     removeMouseListener (&focusListener);
     setLookAndFeel (nullptr);
@@ -830,6 +984,204 @@ void ModloaderEditor::chooseDat()
                               orb_modloader_load (engine, orb_modloader_current_mod (engine));
                               refreshModLabel();
                           });
+}
+
+int ModloaderEditor::focusedDrum() const
+{
+    return focusedMachine == 0 ? sel808 : sel909;
+}
+
+bool ModloaderEditor::loadFocusedPattern (uint8_t* dest)
+{
+    auto* e = eng();
+    if (e == nullptr || focusedMachine < 0)
+        return false;
+    uint8_t all[ModloaderProcessor::kPatternBytes];
+    if (orb_modloader_get_patterns (e, focusedMachine, all, ModloaderProcessor::kPatternBytes) <= 0)
+        return false;
+    std::memcpy (dest, all + (size_t) currentPattern (focusedMachine) * (size_t) kPatLen, (size_t) kPatLen);
+    return true;
+}
+
+void ModloaderEditor::storeFocusedPattern (const uint8_t* src)
+{
+    auto* e = eng();
+    if (e == nullptr || focusedMachine < 0)
+        return;
+    uint8_t all[ModloaderProcessor::kPatternBytes];
+    if (orb_modloader_get_patterns (e, focusedMachine, all, ModloaderProcessor::kPatternBytes) <= 0)
+        return;
+    std::memcpy (all + (size_t) currentPattern (focusedMachine) * (size_t) kPatLen, src, (size_t) kPatLen);
+    orb_modloader_set_patterns (e, focusedMachine, all, ModloaderProcessor::kPatternBytes);
+    refreshSteps();
+    refreshPatternHeader();
+}
+
+void ModloaderEditor::resetDevice()
+{
+    proc.resetDevice();
+    flamEntry.setToggleState (false, juce::dontSendNotification);
+    pat808.shownBank = 0;
+    pat909.shownBank = 0;
+    select808 (1);
+    select909 (1);
+    refreshPatternHeader();
+    refreshSteps();
+    refreshDisable();
+    sync808Radios();
+    repaint();
+}
+
+void ModloaderEditor::editCut()
+{
+    editCopy();
+    editClear();
+}
+
+void ModloaderEditor::editCopy()
+{
+    uint8_t pat[kPatLen];
+    if (! loadFocusedPattern (pat))
+        return;
+    proc.patternClip.valid = true;
+    proc.patternClip.machine = focusedMachine;
+    std::memcpy (proc.patternClip.bytes.data(), pat, (size_t) kPatLen);
+}
+
+void ModloaderEditor::editPaste (bool replace)
+{
+    if (! proc.patternClip.valid || proc.patternClip.machine != focusedMachine)
+        return;
+    uint8_t pat[kPatLen];
+    if (replace)
+    {
+        std::memcpy (pat, proc.patternClip.bytes.data(), (size_t) kPatLen);
+        storeFocusedPattern (pat);
+        return;
+    }
+    if (! loadFocusedPattern (pat))
+        return;
+    for (int s = 0; s < kSteps; ++s)
+        for (int c = 0; c < kCols; ++c)
+            if (const auto v = proc.patternClip.bytes[(size_t) (2 + kCols * s + c)]; v != 0)
+                patCell (pat, s, c) = v;
+    if (focusedMachine == 1)
+        exclusiveHats (pat, k909OH);
+    storeFocusedPattern (pat);
+}
+
+void ModloaderEditor::editClear()
+{
+    uint8_t pat[kPatLen];
+    if (! loadFocusedPattern (pat))
+        return;
+    clearSteps (pat);
+    storeFocusedPattern (pat);
+}
+
+void ModloaderEditor::editShift (bool right, bool drumOnly)
+{
+    uint8_t pat[kPatLen];
+    if (! loadFocusedPattern (pat))
+        return;
+    if (drumOnly)
+    {
+        const int col = focusedDrum();
+        shiftColumn (pat, col, right);
+        if (focusedMachine == 1 && (col == k909CH || col == k909OH))
+            exclusiveHats (pat, col);
+    }
+    else
+    {
+        for (int c = 0; c < kCols; ++c)
+            shiftColumn (pat, c, right);
+    }
+    storeFocusedPattern (pat);
+}
+
+void ModloaderEditor::editRandomize (bool drumOnly)
+{
+    uint8_t pat[kPatLen];
+    if (! loadFocusedPattern (pat))
+        return;
+    juce::Random rng;
+    const bool is909 = focusedMachine == 1;
+    if (drumOnly)
+    {
+        const int col = focusedDrum();
+        for (int s = 0; s < kSteps; ++s)
+            patCell (pat, s, col) = randomCell (is909, col, rng);
+        if (is909 && (col == k909CH || col == k909OH))
+            exclusiveHats (pat, col);
+    }
+    else
+    {
+        for (int c = 0; c < kCols; ++c)
+            for (int s = 0; s < kSteps; ++s)
+                patCell (pat, s, c) = randomCell (is909, c, rng);
+        if (is909)
+            exclusiveHats (pat, k909OH);
+    }
+    storeFocusedPattern (pat);
+}
+
+void ModloaderEditor::editAlter (bool drumOnly)
+{
+    uint8_t pat[kPatLen];
+    if (! loadFocusedPattern (pat))
+        return;
+    juce::Random rng;
+    if (drumOnly)
+    {
+        const int col = focusedDrum();
+        shuffleColumn (pat, col, rng);
+        if (focusedMachine == 1 && (col == k909CH || col == k909OH))
+            exclusiveHats (pat, col);
+    }
+    else
+    {
+        for (int c = 0; c < kCols; ++c)
+            shuffleColumn (pat, c, rng);
+        if (focusedMachine == 1)
+            exclusiveHats (pat, k909OH);
+    }
+    storeFocusedPattern (pat);
+}
+
+void ModloaderEditor::showContextMenu()
+{
+    if (juce::Component::getCurrentlyModalComponent() != nullptr)
+        return;
+
+    const bool haveFocus = focusedMachine >= 0;
+    const bool canPaste = haveFocus && proc.patternClip.valid
+                          && proc.patternClip.machine == focusedMachine;
+
+    juce::PopupMenu edit;
+    edit.setLookAndFeel (&lnf);
+    edit.addItem ("Cut Pattern", haveFocus, false, [this] { editCut(); });
+    edit.addItem ("Copy Pattern", haveFocus, false, [this] { editCopy(); });
+    edit.addItem ("Paste Pattern", canPaste, false, [this] { editPaste (false); });
+    edit.addItem ("Paste Replace", canPaste, false, [this] { editPaste (true); });
+    edit.addItem ("Clear Pattern", haveFocus, false, [this] { editClear(); });
+    edit.addSeparator();
+    edit.addItem ("Shift Pattern Left", haveFocus, false, [this] { editShift (false, false); });
+    edit.addItem ("Shift Pattern Right", haveFocus, false, [this] { editShift (true, false); });
+    edit.addItem ("Shift Drum Left", haveFocus, false, [this] { editShift (false, true); });
+    edit.addItem ("Shift Drum Right", haveFocus, false, [this] { editShift (true, true); });
+    edit.addSeparator();
+    edit.addItem ("Randomize Pattern", haveFocus, false, [this] { editRandomize (false); });
+    edit.addItem ("Randomize Drum", haveFocus, false, [this] { editRandomize (true); });
+    edit.addItem ("Alter Pattern", haveFocus, false, [this] { editAlter (false); });
+    edit.addItem ("Alter Drum", haveFocus, false, [this] { editAlter (true); });
+
+    juce::PopupMenu menu;
+    menu.setLookAndFeel (&lnf);
+    menu.addItem ("Reset Device", [this] { resetDevice(); });
+    menu.addSubMenu ("Edit", std::move (edit));
+    menu.showMenuAsync (juce::PopupMenu::Options()
+                            .withParentComponent (this)
+                            .withMousePosition());
 }
 
 void ModloaderEditor::timerCallback()

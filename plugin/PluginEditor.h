@@ -19,6 +19,32 @@ public:
     juce::Button* createSliderButton (juce::Slider&, bool isIncrement) override;
     juce::Font getTextButtonFont (juce::TextButton&, int buttonHeight) override;
     juce::Font getLabelFont (juce::Label&) override;
+    juce::Font getPopupMenuFont() override;
+    void drawPopupMenuBackground (juce::Graphics&, int width, int height) override;
+};
+
+class ModSlider final : public juce::Slider
+{
+public:
+    void mouseDown (const juce::MouseEvent&) override;
+    void mouseDrag (const juce::MouseEvent&) override;
+    void mouseUp (const juce::MouseEvent&) override;
+};
+
+class ModTextButton final : public juce::TextButton
+{
+public:
+    using juce::TextButton::TextButton;
+    void mouseDown (const juce::MouseEvent&) override;
+    void mouseUp (const juce::MouseEvent&) override;
+};
+
+class ModToggleButton final : public juce::ToggleButton
+{
+public:
+    using juce::ToggleButton::ToggleButton;
+    void mouseDown (const juce::MouseEvent&) override;
+    void mouseUp (const juce::MouseEvent&) override;
 };
 
 class StepButton final : public juce::TextButton
@@ -27,6 +53,8 @@ public:
     void setCell (int value, bool is909);
     void setDownbeat (bool isDownbeat);
     void paintButton (juce::Graphics&, bool highlighted, bool down) override;
+    void mouseDown (const juce::MouseEvent&) override;
+    void mouseUp (const juce::MouseEvent&) override;
 
 private:
     int value = 0;
@@ -49,6 +77,8 @@ class IncDecArrowButton final : public juce::Button
 public:
     explicit IncDecArrowButton (bool up);
     void paintButton (juce::Graphics&, bool highlighted, bool down) override;
+    void mouseDown (const juce::MouseEvent&) override;
+    void mouseUp (const juce::MouseEvent&) override;
 
 private:
     bool isUp;
@@ -88,6 +118,18 @@ private:
     void chooseModsFolder();
     void applyPickedMod (const juce::File&);
     void chooseDat();
+    void showContextMenu();
+    void resetDevice();
+    void editCut();
+    void editCopy();
+    void editPaste (bool replace);
+    void editClear();
+    void editShift (bool right, bool drumOnly);
+    void editRandomize (bool drumOnly);
+    void editAlter (bool drumOnly);
+    bool loadFocusedPattern (uint8_t* dest);
+    void storeFocusedPattern (const uint8_t* src);
+    int focusedDrum() const;
     uint8_t currentPattern (int machine) const;
     OrbModloader* eng() { return proc.engine(); }
 
@@ -96,16 +138,16 @@ private:
 
     juce::Label title, modName, status, shuffleN, flamN;
     IncDecArrowButton modUp { true }, modDown { false };
-    juce::TextButton folderBtn { "MOD" }, datBtn { "DAT" };
-    juce::Slider shuffle;
+    ModTextButton folderBtn { "MOD" }, datBtn { "DAT" };
+    ModSlider shuffle;
     juce::AudioProcessorValueTreeState::SliderAttachment shuffleA;
 
     struct PatternUi
     {
-        juce::ToggleButton enable { "ON" };
-        juce::TextButton bank[4];
-        juce::TextButton pat[8];
-        juce::ToggleButton shuffleBtn { "SHUFFLE" };
+        ModToggleButton enable { "ON" };
+        ModTextButton bank[4];
+        ModTextButton pat[8];
+        ModToggleButton shuffleBtn { "SHUFFLE" };
         juce::Label stepsLabel { {}, "STEPS" };
         juce::Label stepsValue { {}, "16" };
         IncDecArrowButton stepsUp { true };
@@ -119,11 +161,11 @@ private:
     };
     PatternUi pat808, pat909;
 
-    std::array<juce::Slider, ORB_MODLOADER_P808> k808;
+    std::array<ModSlider, ORB_MODLOADER_P808> k808;
     std::array<juce::Label, ORB_MODLOADER_P808> n808;
     std::array<std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>, ORB_MODLOADER_P808> k808A;
-    std::array<juce::ToggleButton, 5> sw808;
-    std::array<juce::ToggleButton, 5> sw808Def;
+    std::array<ModToggleButton, 5> sw808;
+    std::array<ModToggleButton, 5> sw808Def;
     std::array<std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>, 5> sw808A;
     std::array<juce::Label, 12> legend808;
     std::array<StepButton, 16> step808;
@@ -131,15 +173,15 @@ private:
     std::array<juce::Rectangle<int>, 12> slot808;
     int sel808 = 1;
 
-    std::array<juce::Slider, ORB_MODLOADER_P909> k909;
+    std::array<ModSlider, ORB_MODLOADER_P909> k909;
     std::array<juce::Label, ORB_MODLOADER_P909> n909;
     std::array<std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>, ORB_MODLOADER_P909> k909A;
     std::array<juce::Label, 12> legend909;
     std::array<juce::Rectangle<int>, 12> slot909;
     std::array<StepButton, 16> step909;
     std::array<StepLed, 16> led909;
-    juce::ToggleButton flamEntry;
-    juce::ToggleButton disable808 { "MUTE" }, disable909 { "MUTE" };
+    ModToggleButton flamEntry;
+    ModToggleButton disable808 { "MUTE" }, disable909 { "MUTE" };
     int sel909 = 1;
     int focusedMachine = -1;
 
@@ -152,8 +194,10 @@ private:
         }
         void mouseUp (const juce::MouseEvent& e) override
         {
-            if (e.mods.isPopupMenu())
-                owner.updateMachineFocus (e.getEventRelativeTo (&owner).getPosition());
+            if (! e.mods.isPopupMenu())
+                return;
+            owner.updateMachineFocus (e.getEventRelativeTo (&owner).getPosition());
+            owner.showContextMenu();
         }
         ModloaderEditor& owner;
     };
