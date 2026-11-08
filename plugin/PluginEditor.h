@@ -107,6 +107,7 @@ private:
     void refreshSteps();
     void refreshModLabel();
     void refreshPatternHeader();
+    void refreshShuffle();
     void refreshDisable();
     void setupDisable (juce::ToggleButton& btn, int machine);
     void click808Step (int step);
@@ -141,13 +142,13 @@ private:
     ModTextButton folderBtn { "MOD" }, datBtn { "DAT" };
     ModSlider shuffle;
     juce::AudioProcessorValueTreeState::SliderAttachment shuffleA;
+    ModToggleButton shuffleOn;
 
     struct PatternUi
     {
         ModToggleButton enable { "ON" };
         ModTextButton bank[4];
         ModTextButton pat[8];
-        ModToggleButton shuffleBtn { "SHUFFLE" };
         juce::Label stepsLabel { {}, "STEPS" };
         juce::Label stepsValue { {}, "16" };
         IncDecArrowButton stepsUp { true };

@@ -513,6 +513,7 @@ ModloaderEditor::ModloaderEditor (ModloaderProcessor& p)
     addLabel (modName, "Standard ReBirth", kText, 14.0f);
     addLabel (status, {}, kMuted, 12.0f);
     addLabel (shuffleN, "SHUFFLE", kMuted, 11.0f);
+    shuffleN.setJustificationType (juce::Justification::centredRight);
     addLabel (flamN, "FLAM", kMuted, 11.0f);
     flamN.setJustificationType (juce::Justification::centredLeft);
     modName.setJustificationType (juce::Justification::centredLeft);
@@ -534,6 +535,18 @@ ModloaderEditor::ModloaderEditor (ModloaderProcessor& p)
     datBtn.onClick = [this] { chooseDat(); };
 
     setupKnob (shuffle, false);
+    shuffleOn.setClickingTogglesState (true);
+    shuffleOn.setButtonText ({});
+    shuffleOn.setColour (juce::ToggleButton::textColourId, kMuted);
+    addAndMakeVisible (shuffleOn);
+    shuffleOn.onClick = [this]
+    {
+        if (focusedMachine < 0)
+            return;
+        if (auto* e = eng())
+            orb_modloader_set_pat_shuffle (e, focusedMachine, currentPattern (focusedMachine),
+                                           shuffleOn.getToggleState() ? 1 : 0);
+    };
 
     setupPatternSection (0);
     setupPatternSection (1);
@@ -617,18 +630,6 @@ void ModloaderEditor::setupPatternSection (int machine)
             refreshSteps();
         };
     }
-    ui.shuffleBtn.setClickingTogglesState (true);
-    ui.shuffleBtn.getProperties().set ("caption", true);
-    ui.shuffleBtn.setColour (juce::ToggleButton::textColourId, kMuted);
-    addAndMakeVisible (ui.shuffleBtn);
-    ui.shuffleBtn.onClick = [this, machine]
-    {
-        auto& section = machine == 0 ? pat808 : pat909;
-        if (auto* e = eng())
-            orb_modloader_set_pat_shuffle (e, machine, currentPattern (machine),
-                                           section.shuffleBtn.getToggleState() ? 1 : 0);
-    };
-
     ui.stepsLabel.setColour (juce::Label::textColourId, kMuted);
     ui.stepsLabel.setFont (juce::FontOptions().withHeight (11.0f).withStyle ("Bold"));
     ui.stepsLabel.setJustificationType (juce::Justification::centredLeft);
@@ -843,7 +844,10 @@ void ModloaderEditor::refreshPatternHeader()
 {
     auto* e = eng();
     if (e == nullptr)
+    {
+        refreshShuffle();
         return;
+    }
     for (int machine = 0; machine < 2; ++machine)
     {
         auto& ui = machine == 0 ? pat808 : pat909;
@@ -852,11 +856,20 @@ void ModloaderEditor::refreshPatternHeader()
             ui.bank[i].setToggleState (i == ui.shownBank, juce::dontSendNotification);
         for (int i = 0; i < 8; ++i)
             ui.pat[i].setToggleState (ui.shownBank == pat / 8 && i == (pat % 8), juce::dontSendNotification);
-        ui.shuffleBtn.setToggleState (orb_modloader_get_pat_shuffle (e, machine, pat) != 0,
-                                      juce::dontSendNotification);
         ui.stepsValue.setText (juce::String ((int) orb_modloader_get_pat_length (e, machine, pat)),
                                juce::dontSendNotification);
     }
+    refreshShuffle();
+}
+
+void ModloaderEditor::refreshShuffle()
+{
+    auto* e = eng();
+    const bool have = e != nullptr && focusedMachine >= 0;
+    shuffleOn.setEnabled (have);
+    const bool on = have
+                    && orb_modloader_get_pat_shuffle (e, focusedMachine, currentPattern (focusedMachine)) != 0;
+    shuffleOn.setToggleState (on, juce::dontSendNotification);
 }
 
 void ModloaderEditor::sync808Radios()
@@ -1223,6 +1236,7 @@ void ModloaderEditor::updateMachineFocus (juce::Point<int> pos)
     if (next == focusedMachine)
         return;
     focusedMachine = next;
+    refreshShuffle();
     repaint();
 }
 
@@ -1341,7 +1355,9 @@ void ModloaderEditor::resized()
     placeHeaderBtn (datBtn);
     status.setBounds (top.removeFromLeft (180));
     shuffle.setBounds (top.removeFromRight (40).reduced (0, 2));
-    shuffleN.setBounds (top.removeFromRight (64));
+    constexpr int shuffleTick = 22;
+    shuffleOn.setBounds (top.removeFromRight (shuffleTick).withSizeKeepingCentre (shuffleTick, shuffleTick));
+    shuffleN.setBounds (top.removeFromRight (56));
 
     auto placePattern = [this] (PatternUi& ui, juce::Rectangle<int> r, bool withFlam)
     {
@@ -1364,7 +1380,7 @@ void ModloaderEditor::resized()
         for (int i = 0; i < 4; ++i)
             ui.bank[i].setBounds (banks.getX() + i * (bw + gap), banks.getY(), bw, banks.getHeight());
 
-        auto bottom = r.removeFromBottom (withFlam ? 114 : 78);
+        auto bottom = r.removeFromBottom (withFlam ? 88 : 46);
         if (withFlam)
         {
             auto flamRow = bottom.removeFromTop (36).reduced (1, 0);
@@ -1374,10 +1390,8 @@ void ModloaderEditor::resized()
             flamN.setBounds (flamLabel.withSizeKeepingCentre (flamLabel.getWidth(), 18));
             k909[29].setBounds (flamRow.removeFromLeft (kFlamKnob)
                                     .withSizeKeepingCentre (kFlamKnob, kFlamKnob));
+            bottom.removeFromTop (6);
         }
-        auto shuffleRow = bottom.removeFromTop (26).reduced (1, 2);
-        ui.shuffleBtn.setBounds (shuffleRow.withWidth (toggleContentWidth (ui.shuffleBtn, shuffleRow.getHeight())));
-        bottom.removeFromTop (6);
         ui.stepsLabel.setBounds (bottom.removeFromTop (14));
         auto row = bottom.removeFromTop (24);
         ui.stepsValue.setBounds (row.removeFromLeft (34).reduced (1, 2));
