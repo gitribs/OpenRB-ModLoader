@@ -67,6 +67,7 @@ public:
 
 private:
     void timerCallback() override;
+    void updateMachineFocus (juce::Point<int> pos);
     void setupKnob (juce::Slider& s, bool red);
     void setupCaptionLabel (juce::Label&, const juce::String&);
     void setupPatternSection (int machine);
@@ -140,6 +141,23 @@ private:
     juce::ToggleButton flamEntry;
     juce::ToggleButton disable808 { "MUTE" }, disable909 { "MUTE" };
     int sel909 = 1;
+    int focusedMachine = -1;
+
+    struct FocusListener final : public juce::MouseListener
+    {
+        explicit FocusListener (ModloaderEditor& o) : owner (o) {}
+        void mouseDown (const juce::MouseEvent& e) override
+        {
+            owner.updateMachineFocus (e.getEventRelativeTo (&owner).getPosition());
+        }
+        void mouseUp (const juce::MouseEvent& e) override
+        {
+            if (e.mods.isPopupMenu())
+                owner.updateMachineFocus (e.getEventRelativeTo (&owner).getPosition());
+        }
+        ModloaderEditor& owner;
+    };
+    FocusListener focusListener { *this };
 
     std::unique_ptr<juce::FileChooser> chooser;
 

@@ -10,7 +10,7 @@ const juce::Colour kMuted { 0xff8a8680 };
 const juce::Colour kWell { 0xff1a1a1c };
 const juce::Colour kLine { 0xff3a3a40 };
 const juce::Colour kRed { 0xffc44c3a };
-const juce::Colour kOrange { 0xffe07030 };
+const juce::Colour kVelHigh { 0xffb03c32 };
 const juce::Colour kGreen { 0xff3cb86a };
 const juce::Colour kLed { 0xff6ec4f0 };
 const juce::Colour kBeatWell { 0xff3a3a42 };
@@ -25,6 +25,8 @@ constexpr int kLabelH = 14;
 constexpr int kCtrlRow = kLabelH + kKnobSize + 4;
 constexpr int kSlot0X = 148;
 constexpr int kSlotAreaW = 876;
+const juce::Rectangle<int> kMachine808 { 8, 64, kEditorW - 16, 270 };
+const juce::Rectangle<int> kMachine909 { 8, 342, kEditorW - 16, 290 };
 constexpr int k808SlotW = kSlotAreaW / 12;
 constexpr int k909SlotW[] = { 56, 92, 92, 88, 88, 88, 56, 56, 56, 68, 68, 68 };
 constexpr int kSwitch808[] = { 11, 14, 17, 19, 21 };
@@ -102,6 +104,19 @@ int mixBusFor909 (int col)
         return -1;
     return 11 + (col - 1);
 }
+
+int toggleContentWidth (const juce::ToggleButton& button, int height)
+{
+    const bool radio = (bool) button.getProperties()["radio"];
+    const bool caption = (bool) button.getProperties()["caption"];
+    const auto fontSize = juce::jmin (15.0f, (float) height * 0.75f);
+    const auto tickWidth = radio ? juce::jmin (11.0f, (float) height - 2.0f)
+                                 : fontSize * 1.1f;
+    const auto font = caption ? juce::Font { juce::FontOptions().withHeight (11.0f).withStyle ("Bold") }
+                              : juce::Font { juce::FontOptions (fontSize) };
+    const int textW = juce::GlyphArrangement::getStringWidthInt (font, button.getButtonText());
+    return juce::roundToInt (tickWidth) + textW + 16;
+}
 } // namespace
 
 IncDecArrowButton::IncDecArrowButton (bool up) : juce::Button ({}), isUp (up) {}
@@ -168,9 +183,9 @@ void StepButton::paintButton (juce::Graphics& g, bool, bool)
     if (is909)
     {
         if (value == 1)
-            c = kOrange;
+            c = kAmber;
         else if (value == 2)
-            c = kRed;
+            c = kVelHigh;
         else if (value >= 3)
             c = kGreen;
     }
@@ -354,17 +369,20 @@ ModloaderEditor::ModloaderEditor (ModloaderProcessor& p)
     setupDisable (disable909, 1);
     select808 (1);
     select909 (1);
+    addMouseListener (&focusListener, true);
     pat808.shownBank = currentPattern (0) / 8;
     pat909.shownBank = currentPattern (1) / 8;
     refreshPatternHeader();
     refreshModLabel();
     refreshSteps();
+    resized();
     startTimerHz (30);
 }
 
 ModloaderEditor::~ModloaderEditor()
 {
     stopTimer();
+    removeMouseListener (&focusListener);
     setLookAndFeel (nullptr);
 }
 
@@ -824,6 +842,17 @@ void ModloaderEditor::timerCallback()
     repaint();
 }
 
+void ModloaderEditor::updateMachineFocus (juce::Point<int> pos)
+{
+    const int next = kMachine808.contains (pos) ? 0
+                   : kMachine909.contains (pos) ? 1
+                   : focusedMachine;
+    if (next == focusedMachine)
+        return;
+    focusedMachine = next;
+    repaint();
+}
+
 void ModloaderEditor::mouseDown (const juce::MouseEvent& e)
 {
     for (int i = 0; i < 12; ++i)
@@ -867,8 +896,15 @@ void ModloaderEditor::paint (juce::Graphics& g)
         g.drawRoundedRectangle (r.toFloat(), 8.0f, 1.0f);
     };
     drawPanel ({ 8, 8, kEditorW - 16, 48 });
-    drawPanel ({ 8, 64, kEditorW - 16, 270 });
-    drawPanel ({ 8, 342, kEditorW - 16, 290 });
+    drawPanel (kMachine808);
+    drawPanel (kMachine909);
+
+    if (focusedMachine >= 0)
+    {
+        const auto r = (focusedMachine == 0 ? kMachine808 : kMachine909).toFloat();
+        g.setColour (kAmber);
+        g.fillRect (r.getX() + 3.0f, r.getY() + 10.0f, 2.0f, r.getHeight() - 20.0f);
+    }
 
     auto paintSlots = [&] (const std::array<juce::Rectangle<int>, 12>& slots)
     {
@@ -964,7 +1000,8 @@ void ModloaderEditor::resized()
             k909[29].setBounds (flamRow.removeFromLeft (kFlamKnob)
                                     .withSizeKeepingCentre (kFlamKnob, kFlamKnob));
         }
-        ui.shuffleBtn.setBounds (bottom.removeFromTop (26).reduced (1, 2));
+        auto shuffleRow = bottom.removeFromTop (26).reduced (1, 2);
+        ui.shuffleBtn.setBounds (shuffleRow.withWidth (toggleContentWidth (ui.shuffleBtn, shuffleRow.getHeight())));
         bottom.removeFromTop (6);
         ui.stepsLabel.setBounds (bottom.removeFromTop (14));
         auto row = bottom.removeFromTop (24);
@@ -974,13 +1011,14 @@ void ModloaderEditor::resized()
     };
 
     const int machineRight = kEditorW - 16;
-    const int toggleW = 96;
     constexpr int enableH = 22;
     constexpr int enableGap = 8;
-    pat808.enable.setBounds (16, 72, 118, enableH);
-    pat909.enable.setBounds (16, 350, 118, enableH);
-    placePattern (pat808, { 16, 72 + enableH + enableGap, 118, 322 - (72 + enableH + enableGap) }, false);
-    placePattern (pat909, { 16, 350 + enableH + enableGap, 118, 620 - (350 + enableH + enableGap) }, true);
+    constexpr int leftColX = 18;
+    constexpr int leftColW = 118;
+    pat808.enable.setBounds (leftColX, 72, toggleContentWidth (pat808.enable, enableH), enableH);
+    pat909.enable.setBounds (leftColX, 350, toggleContentWidth (pat909.enable, enableH), enableH);
+    placePattern (pat808, { leftColX, 72 + enableH + enableGap, leftColW, 322 - (72 + enableH + enableGap) }, false);
+    placePattern (pat909, { leftColX, 350 + enableH + enableGap, leftColW, 620 - (350 + enableH + enableGap) }, true);
 
     const int y808 = 76;
     const int y909 = 358;
@@ -1005,11 +1043,15 @@ void ModloaderEditor::resized()
     };
     auto place808Sw = [this] (int i, int col, int row)
     {
-        const int x = kSlot0X + col * k808SlotW + 4;
+        const int slotX = kSlot0X + col * k808SlotW;
         const int y = y808 + row * kCtrlRow + 6;
-        const int w = k808SlotW - 8;
-        sw808[(size_t) i].setBounds (x, y, w, 16);
-        sw808Def[(size_t) i].setBounds (x, y + 16, w, 16);
+        constexpr int h = 16;
+        auto& alt = sw808[(size_t) i];
+        auto& def = sw808Def[(size_t) i];
+        const int w = juce::jmax (toggleContentWidth (alt, h), toggleContentWidth (def, h));
+        const int x = slotX + (k808SlotW - w) / 2;
+        alt.setBounds (x, y, w, h);
+        def.setBounds (x, y + 16, w, h);
     };
     place808Knob (2, 0, 0);
     place808Knob (3, 1, 0);
@@ -1064,7 +1106,8 @@ void ModloaderEditor::resized()
             steps[(size_t) i].setBounds (kSlot0X + i * 46, stepY, 42, stepH);
             leds[(size_t) i].setBounds (kSlot0X + i * 46 + 17, ledY, 7, ledH);
         }
-        mute.setBounds (machineRight - toggleW, stepY, toggleW, stepH);
+        const int muteW = toggleContentWidth (mute, stepH);
+        mute.setBounds (machineRight - muteW, stepY, muteW, stepH);
     };
     placeSlotsAndSequencer (legend808, step808, led808, disable808, slot808,
                             y808, contentBottom808, true);
