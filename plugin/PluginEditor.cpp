@@ -54,6 +54,7 @@ constexpr int k808SlotW[] = {
 };
 static_assert (k909SlotAreaW == 812);
 static_assert (k808BaseW * 12 + 8 == k909SlotAreaW);
+constexpr int kFaderColW = 20;
 constexpr int kSwitch808[] = { 11, 14, 17, 19, 21 };
 const char* k808Legend[] = { "AC", "BD", "SD", "LT", "MT", "HT", "RS", "CP", "CB", "CY", "OH", "CH" };
 const char* k909Legend[] = { "AC", "BD", "SD", "LT", "MT", "HT", "RS", "CP", "CH", "OH", "CC", "RC" };
@@ -230,6 +231,13 @@ void ModSlider::mouseUp (const juce::MouseEvent& e)
 {
     if (! e.mods.isPopupMenu())
         juce::Slider::mouseUp (e);
+}
+
+bool ModSlider::hitTest (int x, int y)
+{
+    if (! (bool) getProperties()["fader"])
+        return juce::Slider::hitTest (x, y);
+    return x >= 0 && x < kFaderColW && y >= 0 && y < getHeight();
 }
 
 void ModTextButton::mouseDown (const juce::MouseEvent& e)
@@ -830,6 +838,87 @@ void ModloaderLookAndFeel::drawRotarySlider (juce::Graphics& g, int x, int y, in
     g.fillPath (tick, juce::AffineTransform::rotation (angle).translated (centre.x, centre.y));
 }
 
+int ModloaderLookAndFeel::getSliderThumbRadius (juce::Slider& slider)
+{
+    if (slider.getSliderStyle() == juce::Slider::LinearVertical)
+        return 8;
+    return LookAndFeel_V4::getSliderThumbRadius (slider);
+}
+
+void ModloaderLookAndFeel::drawLinearSlider (juce::Graphics& g, int x, int y, int width, int height,
+                                            float sliderPos, float minSliderPos, float maxSliderPos,
+                                            juce::Slider::SliderStyle, juce::Slider& slider)
+{
+    juce::ignoreUnused (minSliderPos, maxSliderPos);
+    const auto bounds = juce::Rectangle<float> ((float) x, (float) y, (float) width, (float) height);
+    const bool lit = slider.isEnabled() && slider.isMouseOverOrDragging();
+
+    constexpr float capW = 18.0f;
+    constexpr float capH = 16.0f;
+    constexpr float grooveW = 8.0f;
+    const float faderColW = (float) kFaderColW;
+    const float cx = bounds.getX() + faderColW * 0.5f;
+
+    auto groove = juce::Rectangle<float> (cx - grooveW * 0.5f, bounds.getY() + 1.0f,
+                                          grooveW, bounds.getHeight() - 2.0f);
+    g.setColour (kWell);
+    g.fillRoundedRectangle (groove, 2.5f);
+    g.setColour (kLine);
+    g.drawRoundedRectangle (groove.reduced (0.5f), 2.5f, 1.2f);
+
+    auto inner = groove.reduced (1.6f);
+    const float fillTop = juce::jlimit (inner.getY(), inner.getBottom(), sliderPos);
+    auto fill = inner.withTop (fillTop);
+    if (fill.getHeight() > 0.5f)
+    {
+        g.setColour (kAmber);
+        g.fillRoundedRectangle (fill, 1.2f);
+    }
+
+    const float thumbR = (float) getSliderThumbRadius (slider);
+    const float yTop = (float) y + thumbR;
+    const float yBot = (float) (y + height) - thumbR;
+    auto yAtDb = [yTop, yBot] (float db)
+    {
+        // 0 dB at the top; -24 sits ~80% down, matching a mixer scale with a little throw below.
+        const float t = juce::jlimit (0.0f, 1.0f, -db / 30.0f);
+        return yTop + t * (yBot - yTop);
+    };
+
+    const float tickX = bounds.getX() + faderColW + 2.0f;
+    constexpr float tickW = 5.0f;
+    const auto scaleC = kMuted.brighter (0.35f);
+    g.setColour (scaleC);
+    for (int n = 0; n <= 30; ++n)
+        g.fillRect (tickX, yAtDb ((float) -n) - 0.5f, tickW, 1.0f);
+
+    g.setFont (juce::Font { juce::FontOptions (10.0f) });
+    const float labelX = tickX + tickW + 3.0f;
+    const float labelW = bounds.getRight() - labelX - 1.0f;
+    constexpr float labelH = 14.0f;
+    const char* labels[] = { "0 dB", "-6", "-12", "-18", "-24" };
+    const int majors[] = { 0, 6, 12, 18, 24 };
+    for (int i = 0; i < 5; ++i)
+        g.drawText (labels[i], juce::Rectangle<float> (labelX, yAtDb ((float) -majors[i]) - labelH * 0.5f,
+                                                       labelW, labelH),
+                    juce::Justification::centredLeft, false);
+
+    auto cap = juce::Rectangle<float> (cx - capW * 0.5f, sliderPos - capH * 0.5f, capW, capH);
+    g.setColour (kSlotB);
+    g.fillRoundedRectangle (cap, 2.5f);
+    g.setColour (lit ? kAmber : kLine);
+    g.drawRoundedRectangle (cap.reduced (0.5f), 2.5f, 1.2f);
+
+    const float gx = cap.getX() + 3.5f;
+    const float gw = cap.getWidth() - 7.0f;
+    const float cy = cap.getCentreY();
+    g.setColour (kMuted);
+    g.fillRect (gx, cy - 3.0f, gw, 1.0f);
+    g.fillRect (gx, cy + 2.0f, gw, 1.0f);
+    g.setColour (kText);
+    g.fillRect (gx, cy - 0.5f, gw, 1.2f);
+}
+
 void ModloaderLookAndFeel::drawToggleButton (juce::Graphics& g, juce::ToggleButton& button,
                                              bool highlighted, bool down)
 {
@@ -923,6 +1012,8 @@ ModloaderEditor::ModloaderEditor (ModloaderProcessor& p)
     : AudioProcessorEditor (&p),
       proc (p),
       shuffleA (p.apvts, "shuffle", shuffle),
+      vol808A (p.apvts, "mix_808", vol808),
+      vol909A (p.apvts, "mix_909", vol909),
       pat808 (p.apvts, ModloaderProcessor::p808Id (0)),
       pat909 (p.apvts, ModloaderProcessor::p909Id (0))
 {
@@ -971,6 +1062,10 @@ ModloaderEditor::ModloaderEditor (ModloaderProcessor& p)
     settingsBtn.onClick = [this] { toggleSettings(); };
 
     setupKnob (shuffle, false);
+    setupFader (vol808);
+    setupFader (vol909);
+    vol808.setTooltip ("808 Volume");
+    vol909.setTooltip ("909 Volume");
     shuffleOn.setClickingTogglesState (true);
     shuffleOn.setButtonText ({});
     shuffleOn.setColour (juce::ToggleButton::textColourId, kMuted);
@@ -1028,6 +1123,15 @@ void ModloaderEditor::setupKnob (juce::Slider& s, bool red)
     s.setMouseDragSensitivity (110);
     if (red)
         s.getProperties().set ("red", true);
+    addAndMakeVisible (s);
+}
+
+void ModloaderEditor::setupFader (juce::Slider& s)
+{
+    s.setSliderStyle (juce::Slider::LinearVertical);
+    s.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
+    s.setSliderSnapsToMousePosition (true);
+    s.getProperties().set ("fader", true);
     addAndMakeVisible (s);
 }
 
@@ -2320,6 +2424,16 @@ void ModloaderEditor::resized()
 
     placeSlotsAndSequencer (legend909, step909, led909, disable909, slot909,
                             y909, contentBottom909, false);
+
+    auto placeMixFader = [&] (juce::Slider& fader, const std::array<juce::Rectangle<int>, 12>& slots)
+    {
+        const int availX = kSlot0X + k909SlotAreaW;
+        const int availW = machineRight - availX;
+        const auto slot = slots[0];
+        fader.setBounds (availX, slot.getY(), availW, slot.getHeight());
+    };
+    placeMixFader (vol808, slot808);
+    placeMixFader (vol909, slot909);
 
     if (settingsPanel != nullptr)
         settingsPanel->setBounds (getLocalBounds());

@@ -216,6 +216,8 @@ void ModloaderProcessor::applySongParams (const OrbModloaderSong& song)
         setParam (p909Id (i), song.p909[i], false);
 
     setParam ("shuffle", song.shuffle, false);
+    setParam ("mix_808", song.mix808, false);
+    setParam ("mix_909", song.mix909, false);
 }
 
 void ModloaderProcessor::fillSongParams (OrbModloaderSong& song) const
@@ -233,6 +235,8 @@ void ModloaderProcessor::fillSongParams (OrbModloaderSong& song) const
     for (int i = 2; i < ORB_MODLOADER_P909; ++i)
         song.p909[i] = (uint8_t) juce::jlimit (0, 127, asInt (p909Id (i), kDefault909[i]));
     song.shuffle = (uint8_t) juce::jlimit (0, 127, asInt ("shuffle", 64));
+    song.mix808 = (uint8_t) juce::jlimit (0, 127, asInt ("mix_808", 100));
+    song.mix909 = (uint8_t) juce::jlimit (0, 127, asInt ("mix_909", 100));
 
     if (engine_ == nullptr)
         return;
@@ -386,6 +390,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout ModloaderProcessor::createLa
 
     // ReBirth default 64. Amounts 0–5 are identity (engine divides by 6).
     p.push_back (std::make_unique<AudioParameterInt> (ParameterID { "shuffle", 1 }, "Shuffle", 0, 127, 64));
+    p.push_back (std::make_unique<AudioParameterInt> (
+        ParameterID { "mix_808", 1 }, "808 Volume", 0, 127, 100));
+    p.push_back (std::make_unique<AudioParameterInt> (
+        ParameterID { "mix_909", 1 }, "909 Volume", 0, 127, 100));
 
     for (int i = 0; i < kAuxBuses; ++i)
         p.push_back (std::make_unique<AudioParameterBool> (
@@ -507,6 +515,8 @@ OrbModloaderParams ModloaderProcessor::readParams (bool bypass) const
     for (int i = 0; i < kAuxBuses; ++i)
         params.direct[i] = asInt (directId (i), 0) != 0 ? 1 : 0;
     params.bypass = bypass ? 1 : 0;
+    params.mix808 = (uint8_t) juce::jlimit (0, 127, asInt ("mix_808", 100));
+    params.mix909 = (uint8_t) juce::jlimit (0, 127, asInt ("mix_909", 100));
     return params;
 }
 

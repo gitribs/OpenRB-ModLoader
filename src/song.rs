@@ -14,6 +14,8 @@ pub struct SongInfo {
     pub p808: [u8; P808],
     pub p909: [u8; P909],
     pub shuffle: u8,
+    pub mix808: u8,
+    pub mix909: u8,
     pub mod_name: [i8; 65],
 }
 
@@ -23,6 +25,8 @@ impl Default for SongInfo {
             p808: [0; P808],
             p909: [0; P909],
             shuffle: 0,
+            mix808: 100,
+            mix909: 100,
             mod_name: [0; 65],
         }
     }
@@ -77,18 +81,25 @@ fn patterns_from_bytes(buf: &[u8]) -> Vec<PatternDrum> {
 
 impl Modloader {
     /// Parse a ReBirth 2.x `.rbs` file, apply 808/909 patterns, and return panel values.
-    /// 303s, mixer, effects, and song-mode tracks are ignored. On failure, [`Self::status`]
-    /// holds the reason and patterns are left unchanged.
+    /// 303s, mixer inserts, effects, and song-mode tracks are ignored; the 808 and 909 mixer
+    /// channel levels are kept. On failure, [`Self::status`] holds the reason and patterns
+    /// are left unchanged.
     pub fn load_song(&mut self, data: &[u8]) -> Result<SongInfo, String> {
         let file = rbs::Song::parse(data).map_err(|e| e.to_string())?;
         let song = load::convert(&file).map_err(|e| e.to_string())?;
-        self.tr808.patterns.copy_from_slice(&dump_patterns(&song.tr808.patterns));
-        self.tr909.patterns.copy_from_slice(&dump_patterns(&song.tr909.patterns));
+        self.tr808
+            .patterns
+            .copy_from_slice(&dump_patterns(&song.tr808.patterns));
+        self.tr909
+            .patterns
+            .copy_from_slice(&dump_patterns(&song.tr909.patterns));
 
         let mut info = SongInfo::default();
         info.p808.copy_from_slice(&song.tr808.params[..P808]);
         info.p909.copy_from_slice(&song.tr909.params[..P909]);
         info.shuffle = song.globals.shuffle;
+        info.mix808 = song.mixer.channels[2].level;
+        info.mix909 = song.mixer.channels[3].level;
         copy_mod_name(&song.mod_name, &mut info.mod_name);
         Ok(info)
     }
@@ -117,6 +128,8 @@ impl Modloader {
             ch.delay_send = 0;
             ch.dist = 0;
         }
+        song.mixer.channels[2].level = info.mix808.min(127);
+        song.mixer.channels[3].level = info.mix909.min(127);
 
         let tb = &tb303::DEFAULT_PARAMS[..9];
         song.tb303[0].params.copy_from_slice(tb);

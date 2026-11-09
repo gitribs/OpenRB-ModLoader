@@ -21,7 +21,18 @@ fn jpeg_size(data: &[u8]) -> Option<(u16, u16)> {
         let len = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
         if matches!(
             marker,
-            0xC0 | 0xC1 | 0xC2 | 0xC3 | 0xC5 | 0xC6 | 0xC7 | 0xC9 | 0xCA | 0xCB | 0xCD | 0xCE | 0xCF
+            0xC0 | 0xC1
+                | 0xC2
+                | 0xC3
+                | 0xC5
+                | 0xC6
+                | 0xC7
+                | 0xC9
+                | 0xCA
+                | 0xCB
+                | 0xCD
+                | 0xCE
+                | 0xCF
         ) && i + 8 < data.len()
         {
             let h = u16::from_be_bytes([data[i + 5], data[i + 6]]);
@@ -149,10 +160,48 @@ fn pattern_shuffle_delays_offbeat() {
     let straight = first_hit(0, 127);
     let amount_off = first_hit(1, 0);
     let swung = first_hit(1, 127);
-    assert_eq!(straight, amount_off, "amount 0 is identity even with the flag on");
+    assert_eq!(
+        straight, amount_off,
+        "amount 0 is identity even with the flag on"
+    );
     assert!(
         swung > straight + BLOCK,
         "flag + amount 127 should delay the offbeat (straight {straight}, swung {swung})"
+    );
+}
+
+/// Mixer channel level is the original 808/909 volume fader: it scales the stereo mix
+/// with ReBirth's level curve and leaves the aux buses alone.
+#[test]
+fn mixer_volume_scales_main_mix() {
+    let n = BLOCK * 8;
+    let run_mix = |mix: u8| {
+        let mut m = Modloader::new();
+        m.set_step(0, 0, 0, tr808::BD as u8, 1);
+        let mut params = Params::default();
+        params.p808[tr808::ENABLED] = 1;
+        params.p808[tr808::BD_LEVEL] = 127;
+        params.p808[tr808::ACCENT] = 127;
+        params.mix808 = mix;
+        params.mix909 = 0;
+        run(&mut m, params, playing(0.0), n)
+    };
+    let (full, aux_full) = run_mix(127);
+    let (def, _) = run_mix(100);
+    let (off, aux_off) = run_mix(0);
+    let e_full = energy(&full[BLOCK..]);
+    let e_def = energy(&def[BLOCK..]);
+    let e_off = energy(&off[BLOCK..]);
+    assert!(e_full > 0.0, "max mixer level still sounds");
+    assert!(
+        e_full > e_def,
+        "127 is louder than the ReBirth default of 100"
+    );
+    assert!(e_off < e_full * 1.0e-3, "mixer 0 silences the main mix");
+    assert!(
+        energy(&aux_full[tr808::VOICE_BD][BLOCK..]) > 0.0
+            && energy(&aux_off[tr808::VOICE_BD][BLOCK..]) > 0.0,
+        "aux buses are independent of the mixer fader"
     );
 }
 
@@ -273,7 +322,7 @@ fn write_min_iso(path: &Path, file_name: &str, payload: &[u8]) {
     std::fs::write(path, image).unwrap();
 }
 
-/// A ReBirth 2.x song round-trips 808/909 patterns, knobs, shuffle, and the mod name.
+/// A ReBirth 2.x song round-trips 808/909 patterns, knobs, mixer levels, shuffle, and the mod name.
 #[test]
 fn rbs_song_roundtrip_drums() {
     let mut m = Modloader::new();
@@ -289,6 +338,8 @@ fn rbs_song_roundtrip_drums() {
     info.p808[tr808::BD_LEVEL] = 90;
     info.p909[tr909::FLAM] = 40;
     info.shuffle = 77;
+    info.mix808 = 80;
+    info.mix909 = 110;
     let name = b"Standard ReBirth";
     for (i, &b) in name.iter().enumerate() {
         info.mod_name[i] = b as i8;
@@ -298,14 +349,26 @@ fn rbs_song_roundtrip_drums() {
     let parsed = rbs::Song::parse(&bytes).expect("parse rbs");
     assert_eq!(parsed.head.version(), "4.2");
     assert_eq!(parsed.glob.mod_name, "Standard ReBirth");
-    assert_eq!(parsed.tb303[0].params, orb_engine::tb303::DEFAULT_PARAMS[..9]);
-    assert!(parsed.tb303[0].patterns.iter().all(|p| p.steps.iter().all(|s| s.rest == 1)));
+    assert_eq!(parsed.mixer.channels[2].level, 80);
+    assert_eq!(parsed.mixer.channels[3].level, 110);
+    assert_eq!(
+        parsed.tb303[0].params,
+        orb_engine::tb303::DEFAULT_PARAMS[..9]
+    );
+    assert!(
+        parsed.tb303[0]
+            .patterns
+            .iter()
+            .all(|p| p.steps.iter().all(|s| s.rest == 1))
+    );
 
     let mut loaded = Modloader::new();
     let got = loaded.load_song(&bytes).expect("load rbs");
     assert_eq!(got.p808[tr808::BD_LEVEL], 90);
     assert_eq!(got.p909[tr909::FLAM], 40);
     assert_eq!(got.shuffle, 77);
+    assert_eq!(got.mix808, 80);
+    assert_eq!(got.mix909, 110);
     let got_name = {
         let b = got.mod_name.map(|c| c as u8);
         let n = b.iter().position(|&c| c == 0).unwrap();

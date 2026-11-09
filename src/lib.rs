@@ -17,11 +17,12 @@ use std::sync::Arc;
 mod iso;
 mod song;
 
-use orb_engine::frame::{BLOCK, Block, ChannelDevice, SongDevice};
+use orb_engine::frame::{BLOCK, Block, ChannelDevice, GUARD, SongDevice};
 use orb_engine::process::ProcessState;
 use orb_engine::samples::{Retired, SampleSet};
 use orb_engine::seq::{self, TEMPO_STEP};
 use orb_engine::song::PPQ;
+use orb_engine::tables;
 use orb_engine::{tr808, tr909};
 use rbm::{KeyTable, Rbm, RbmError, standard};
 use song::SongInfo;
@@ -52,6 +53,10 @@ pub struct Params {
     pub shuffle: u8,
     pub direct: [u8; AUX],
     pub bypass: u8,
+    /// Mixer channel level of the 808 (ReBirth MIXR channel 2, 0..=127, default 100).
+    pub mix808: u8,
+    /// Mixer channel level of the 909 (ReBirth MIXR channel 3, 0..=127, default 100).
+    pub mix909: u8,
 }
 
 impl Default for Params {
@@ -66,6 +71,8 @@ impl Default for Params {
             shuffle: 64,
             direct: [0; AUX],
             bypass: 0,
+            mix808: 100,
+            mix909: 100,
         }
     }
 }
@@ -154,6 +161,33 @@ fn copy_cstr(src: &str, buf: *mut i8, buflen: i32) {
 fn byte_order(a: &Path, b: &Path) -> std::cmp::Ordering {
     let key = |p: &Path| p.file_name().map(|f| f.as_encoded_bytes().to_vec());
     key(a).cmp(&key(b)).then_with(|| a.cmp(b))
+}
+
+/// ReBirth mixer keep/take/ramp (`dbl_10151F48`, `dbl_10151F50`, `dbl_10151F58`).
+const MIX_KEEP: f64 = f64::from_bits(0x3FED_C28F_5C28_F5C3);
+const MIX_TAKE: f64 = f64::from_bits(0x3FB1_EB85_1EB8_51EC);
+const MIX_RAMP: f64 = f64::from_bits(0x3FA0_0000_0000_0000);
+
+fn mixer_target(level: u8, curve: &[f32; 128]) -> f32 {
+    let i = (level as usize).min(127);
+    (GUARD as f64 + curve[i] as f64) as f32
+}
+
+/// Mixer channel gain: `T[level] + 1e-6` at pan centre, smoothed like `sub_10013444`.
+fn mix_channel(src: &[f32; BLOCK], old: f32, target: f32) -> (f32, [f32; BLOCK]) {
+    let old_d = old as f64;
+    let new_d = old_d * MIX_KEEP + target as f64 * MIX_TAKE;
+    let stored = new_d as f32;
+    let dl = (new_d - old_d) * MIX_RAMP;
+    let mut out = [0.0f32; BLOCK];
+    let mut g = old_d;
+    for i in (0..BLOCK).step_by(2) {
+        for j in i..i + 2 {
+            out[j] = (src[j] as f64 * g) as f32;
+        }
+        g += dl;
+    }
+    (stored, out)
 }
 
 #[derive(Clone)]
@@ -291,6 +325,10 @@ pub struct Modloader {
     held_tick: i32,
     last_tick: Option<i32>,
     blocks_processed: u64,
+    mix_level: [f32; 128],
+    gain_808: f32,
+    gain_909: f32,
+    mix_primed: bool,
     mods: Vec<ModEntry>,
     mods_dir: PathBuf,
     dat_path: Option<PathBuf>,
@@ -314,6 +352,8 @@ impl Modloader {
             .filter(|v| !v.is_empty())
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(DEFAULT_MODS_DIR));
+        let mix_level = tables::level_curve();
+        let mix_gain = mixer_target(100, &mix_level);
         let mut m = Self {
             tr808: tr808::Tr808::new(samples.clone(), process.clone()),
             tr909: tr909::Tr909::new(samples, process),
@@ -329,6 +369,10 @@ impl Modloader {
             held_tick: 0,
             last_tick: None,
             blocks_processed: 0,
+            mix_level,
+            gain_808: mix_gain,
+            gain_909: mix_gain,
+            mix_primed: false,
             mods: Vec::new(),
             mods_dir,
             dat_path: None,
@@ -419,9 +463,21 @@ impl Modloader {
                 self.tr808.process_mix(&mut mix808, &mut v808, &d808);
                 self.tr909.process_mix(&mut mix909, &mut v909, &d909);
 
+                let t808 = mixer_target(params.mix808, &self.mix_level);
+                let t909 = mixer_target(params.mix909, &self.mix_level);
+                if !self.mix_primed {
+                    self.gain_808 = t808;
+                    self.gain_909 = t909;
+                    self.mix_primed = true;
+                }
+                let (g808, scaled808) = mix_channel(&mix808, self.gain_808, t808);
+                let (g909, scaled909) = mix_channel(&mix909, self.gain_909, t909);
+                self.gain_808 = g808;
+                self.gain_909 = g909;
+
                 if params.bypass == 0 {
                     for s in 0..BLOCK {
-                        self.work_main[s] = mix808[s] + mix909[s];
+                        self.work_main[s] = scaled808[s] + scaled909[s];
                     }
                     for (i, v) in v808.iter().enumerate() {
                         self.work_aux[i] = *v;

@@ -11,6 +11,10 @@ public:
     ModloaderLookAndFeel();
     void drawRotarySlider (juce::Graphics&, int x, int y, int width, int height, float sliderPos,
                            float rotaryStartAngle, float rotaryEndAngle, juce::Slider&) override;
+    void drawLinearSlider (juce::Graphics&, int x, int y, int width, int height, float sliderPos,
+                           float minSliderPos, float maxSliderPos,
+                           juce::Slider::SliderStyle, juce::Slider&) override;
+    int getSliderThumbRadius (juce::Slider&) override;
     void drawToggleButton (juce::Graphics&, juce::ToggleButton&,
                            bool shouldDrawButtonAsHighlighted, bool shouldDrawButtonAsDown) override;
     void drawTickBox (juce::Graphics&, juce::Component&, float x, float y, float w, float h,
@@ -29,6 +33,7 @@ public:
     void mouseDown (const juce::MouseEvent&) override;
     void mouseDrag (const juce::MouseEvent&) override;
     void mouseUp (const juce::MouseEvent&) override;
+    bool hitTest (int x, int y) override;
 };
 
 class ModTextButton final : public juce::TextButton
@@ -114,6 +119,7 @@ private:
     void timerCallback() override;
     void updateMachineFocus (juce::Point<int> pos);
     void setupKnob (juce::Slider& s, bool red);
+    void setupFader (juce::Slider& s);
     void setupCaptionLabel (juce::Label&, const juce::String&);
     void setupPatternSection (int machine);
     void setup808();
@@ -180,6 +186,8 @@ private:
     ModSlider shuffle;
     juce::AudioProcessorValueTreeState::SliderAttachment shuffleA;
     ModToggleButton shuffleOn;
+    ModSlider vol808, vol909;
+    juce::AudioProcessorValueTreeState::SliderAttachment vol808A, vol909A;
 
     struct PatternUi
     {

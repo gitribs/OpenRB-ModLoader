@@ -20,6 +20,8 @@ typedef struct OrbModloaderParams {
     uint8_t shuffle;
     uint8_t direct[ORB_MODLOADER_AUX];
     uint8_t bypass;
+    uint8_t mix808;
+    uint8_t mix909;
 } OrbModloaderParams;
 
 typedef struct OrbModloaderPlayhead {
@@ -34,6 +36,8 @@ typedef struct OrbModloaderSong {
     uint8_t p808[ORB_MODLOADER_P808];
     uint8_t p909[ORB_MODLOADER_P909];
     uint8_t shuffle;
+    uint8_t mix808;
+    uint8_t mix909;
     char mod_name[ORB_MODLOADER_MOD_NAME];
 } OrbModloaderSong;
 
