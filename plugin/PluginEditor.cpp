@@ -1527,6 +1527,7 @@ void ModloaderEditor::setMixMute (bool on)
     if (auto* param = proc.apvts.getParameter (ModloaderProcessor::mixDirectId (focusedMachine)))
         param->setValueNotifyingHost (on ? 1.0f : 0.0f);
     refreshMixMute();
+    repaint();
 }
 
 void ModloaderEditor::sync808Radios()
@@ -2289,12 +2290,26 @@ void ModloaderEditor::paint (juce::Graphics& g)
     drawPanel (kMachine808);
     drawPanel (kMachine909);
 
-    if (focusedMachine >= 0)
+    auto paintEdgeBar = [&] (juce::Rectangle<int> machine, bool left, juce::Colour colour)
     {
-        const auto r = (focusedMachine == 0 ? kMachine808 : kMachine909).toFloat();
-        g.setColour (kAmber);
-        g.fillRect (r.getX() + 3.0f, r.getY() + 10.0f, 2.0f, r.getHeight() - 20.0f);
-    }
+        const auto r = machine.toFloat();
+        const float x = left ? r.getX() + 3.0f : r.getRight() - 5.0f;
+        g.setColour (colour);
+        g.fillRect (x, r.getY() + 10.0f, 2.0f, r.getHeight() - 20.0f);
+    };
+    if (focusedMachine >= 0)
+        paintEdgeBar (focusedMachine == 0 ? kMachine808 : kMachine909, true, kAmber);
+
+    auto machineMixMuted = [this] (int machine)
+    {
+        if (auto* v = proc.apvts.getRawParameterValue (ModloaderProcessor::mixDirectId (machine)))
+            return v->load() >= 0.5f;
+        return false;
+    };
+    if (machineMixMuted (0))
+        paintEdgeBar (kMachine808, false, kRed);
+    if (machineMixMuted (1))
+        paintEdgeBar (kMachine909, false, kRed);
 
     auto paintSlots = [&] (const std::array<juce::Rectangle<int>, 12>& slots, bool joinHats)
     {
@@ -2337,7 +2352,7 @@ void ModloaderEditor::paint (juce::Graphics& g)
         if (! on)
             return;
         auto r = legend.getBounds().toFloat();
-        g.setColour (kGreen);
+        g.setColour (kRed);
         g.fillRect (r.getX() + 10.0f, r.getBottom() + 1.0f, r.getWidth() - 20.0f, 1.6f);
     };
     for (int i = 0; i < 12; ++i)
@@ -2530,7 +2545,8 @@ void ModloaderEditor::resized()
             leds[(size_t) i].setBounds (kSlot0X + i * 46 + 17, ledY, 7, ledH);
         }
         const int muteW = toggleContentWidth (mute, stepH);
-        mute.setBounds (machineRight - muteW, stepY, muteW, stepH);
+        // tickRight draws the box 4px inset from the button's right edge.
+        mute.setBounds (slotRects[11].getRight() + 4 - muteW, stepY, muteW, stepH);
     };
     placeSlotsAndSequencer (legend808, step808, led808, disable808, slot808,
                             y808, contentBottom808, true);
@@ -2586,7 +2602,7 @@ void ModloaderEditor::resized()
 
     auto placeMixFader = [&] (juce::Slider& fader, const std::array<juce::Rectangle<int>, 12>& slots)
     {
-        const int availX = kSlot0X + k909SlotAreaW;
+        const int availX = kSlot0X + k909SlotAreaW + 6;
         const int availW = machineRight - availX;
         const auto slot = slots[0];
         fader.setBounds (availX, slot.getY(), availW, slot.getHeight());

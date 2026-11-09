@@ -1,0 +1,12 @@
+---
+description: Do not rebuild VST3 or AU after work; only build Standalone when Cursor needs it to verify
+alwaysApply: true
+---
+
+# Build after changes
+
+Do not rebuild VST3 or AU after finishing work. The user rebuilds those manually.
+
+Build **Standalone** (`OpenRbModloader_Standalone`) only when Cursor needs that app to confirm its own work or tests.
+
+Do not run `./scripts/build.sh` or a bare `cmake --build build` unless the user asks for a complete/delivery build of every format.
