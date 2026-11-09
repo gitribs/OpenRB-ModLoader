@@ -80,12 +80,17 @@ an original song replaces its 303s and song tracks.
 
 | Bus | Channels | Notes |
 |-----|----------|--------|
-| Output | stereo | mix of every instrument that is not Disabled |
+| Output | stereo | mix of every instrument that is not Disabled (1/2) |
+| 808 Mix | stereo | 808 mixer channel, after the volume fader (3/4) |
+| 909 Mix | stereo | 909 mixer channel, after the volume fader (5/6) |
 | 808 BD … 808 CY | mono | 11 TR-808 instruments, mix order |
 | 909 BD … 909 RC | mono | 11 TR-909 instruments, mix order |
 
-Aux buses start disabled. **Disable** next to each sequencer omits the selected instrument
-from the stereo mix (Accent has no output). Host aux routing is independent of that.
+808 Mix and 909 Mix are additional main stereo outs and start enabled. Drum-slot auxes start
+disabled. **MUTE** next to each sequencer omits the selected instrument from the stereo mix
+and from that machine's Mix bus (Accent has no output). Header **MUTE** (focused machine)
+omits that machine from Output 1/2 and leaves its Mix bus and slot auxes alone. Host aux
+routing is independent of that. Instrument auxes are independent of the mixer faders.
 Tempo follows the host playhead.
 
 ## Build

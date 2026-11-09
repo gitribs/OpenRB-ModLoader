@@ -3,7 +3,14 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstring>
+
+static_assert (offsetof (OrbModloaderParams, mix808) == 83);
+static_assert (offsetof (OrbModloaderParams, mix909) == 84);
+static_assert (offsetof (OrbModloaderParams, direct_mix808) == 85);
+static_assert (offsetof (OrbModloaderParams, direct_mix909) == 86);
+static_assert (sizeof (OrbModloaderParams) == 87);
 
 namespace
 {
@@ -18,6 +25,8 @@ constexpr uint8_t kDefault909[] = {
     1, 0, 32, 100, 64, 64, 127, 100, 64, 64, 64, 100, 64, 127, 100, 64, 127, 100, 64, 127, 100,
     100, 100, 32, 127, 100, 64, 100, 64, 64
 };
+
+const char* kMixNames[ModloaderProcessor::kMachineBuses] = { "808 Mix", "909 Mix" };
 
 const char* kAuxNames[ORB_MODLOADER_AUX] = {
     "808 BD", "808 SD", "808 LT", "808 MT", "808 HT", "808 RS", "808 CP", "808 CB", "808 OH",
@@ -49,6 +58,44 @@ bool ratesMatch (double a, double b)
 bool isSwitch808 (int ctrl)
 {
     return ctrl == 11 || ctrl == 14 || ctrl == 17 || ctrl == 19 || ctrl == 21;
+}
+
+void fillBusFrom (juce::AudioBuffer<float>&& bus, const float* src, int n)
+{
+    if (src == nullptr || n <= 0)
+        return;
+    for (int ch = 0; ch < bus.getNumChannels(); ++ch)
+    {
+        float* dst = bus.getWritePointer (ch);
+        if (dst != nullptr && dst != src)
+            std::memcpy (dst, src, (size_t) n * sizeof (float));
+    }
+}
+
+void copyMono (float* dst, const float* src, int n)
+{
+    if (dst == nullptr || src == nullptr || dst == src || n <= 0)
+        return;
+    std::memcpy (dst, src, (size_t) n * sizeof (float));
+}
+
+void applyMainMute (float* mainL, float* mainR, const float* mix808, const float* mix909,
+                    bool mute808, bool mute909, int n)
+{
+    if (n <= 0 || mainL == nullptr)
+        return;
+    if (mute808 && mute909)
+    {
+        juce::FloatVectorOperations::clear (mainL, n);
+        if (mainR != nullptr && mainR != mainL)
+            juce::FloatVectorOperations::clear (mainR, n);
+        return;
+    }
+    const float* src = mute909 ? mix808 : (mute808 ? mix909 : nullptr);
+    if (src == nullptr)
+        return;
+    copyMono (mainL, src, n);
+    copyMono (mainR, src, n);
 }
 } // namespace
 
@@ -92,9 +139,16 @@ juce::String ModloaderProcessor::directId (int aux)
     return "direct_" + juce::String (aux);
 }
 
+juce::String ModloaderProcessor::mixDirectId (int machine)
+{
+    return machine == 0 ? "mute_main_808" : "mute_main_909";
+}
+
 juce::AudioProcessor::BusesProperties ModloaderProcessor::createBuses()
 {
     auto buses = BusesProperties().withOutput ("Output", juce::AudioChannelSet::stereo(), true);
+    for (int i = 0; i < kMachineBuses; ++i)
+        buses = buses.withOutput (kMixNames[i], juce::AudioChannelSet::stereo(), true);
     for (int i = 0; i < kAuxBuses; ++i)
         buses = buses.withOutput (kAuxNames[i], juce::AudioChannelSet::mono(), false);
     return buses;
@@ -134,6 +188,9 @@ ModloaderProcessor::ModloaderProcessor()
       apvts (*this, nullptr, "PARAMS", createLayout()),
       engine_ (orb_modloader_new())
 {
+    muteMain808 = apvts.getRawParameterValue (mixDirectId (0));
+    muteMain909 = apvts.getRawParameterValue (mixDirectId (1));
+
     if (engine_ == nullptr)
         return;
 
@@ -398,6 +455,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout ModloaderProcessor::createLa
     for (int i = 0; i < kAuxBuses; ++i)
         p.push_back (std::make_unique<AudioParameterBool> (
             ParameterID { directId (i), 1 }, juce::String ("Mute ") + kAuxNames[i], false));
+    p.push_back (std::make_unique<AudioParameterBool> (
+        ParameterID { mixDirectId (0), 1 }, "Mute 808", false));
+    p.push_back (std::make_unique<AudioParameterBool> (
+        ParameterID { mixDirectId (1), 1 }, "Mute 909", false));
 
     return { p.begin(), p.end() };
 }
@@ -476,10 +537,10 @@ bool ModloaderProcessor::isBusesLayoutSupported (const BusesLayout& layouts) con
         if (! set.isDisabled())
             return false;
 
-    // Hosts disable an aux as disabled(), 0 channels, or discrete-0. Rejecting those
-    // layouts leaves the bus enabled, so the slot never returns to the main mix.
+    // Extra buses may be disabled (0), mono, or stereo. Rejecting stereo extras
+    // makes hosts that apply one arrangement to every bus drop the Mix outs.
     for (int i = 1; i < layouts.outputBuses.size(); ++i)
-        if (layouts.outputBuses.getUnchecked (i).size() > 1)
+        if (layouts.outputBuses.getUnchecked (i).size() > 2)
             return false;
 
     return true;
@@ -495,6 +556,11 @@ int ModloaderProcessor::asInt (const juce::String& id, int fallback) const
     if (auto* v = apvts.getRawParameterValue (id))
         return juce::roundToInt (v->load());
     return fallback;
+}
+
+uint8_t ModloaderProcessor::flagOf (const std::atomic<float>* v)
+{
+    return (v != nullptr && v->load() >= 0.5f) ? 1 : 0;
 }
 
 OrbModloaderParams ModloaderProcessor::readParams (bool bypass) const
@@ -517,6 +583,8 @@ OrbModloaderParams ModloaderProcessor::readParams (bool bypass) const
     params.bypass = bypass ? 1 : 0;
     params.mix808 = (uint8_t) juce::jlimit (0, 127, asInt ("mix_808", 100));
     params.mix909 = (uint8_t) juce::jlimit (0, 127, asInt ("mix_909", 100));
+    params.direct_mix808 = flagOf (muteMain808);
+    params.direct_mix909 = flagOf (muteMain909);
     return params;
 }
 
@@ -662,14 +730,21 @@ void ModloaderProcessor::processBuffer (juce::AudioBuffer<float>& buffer, bool b
                                              : (main.getNumChannels() > 0 ? main.getWritePointer (0)
                                                                           : scratch.getWritePointer (0));
 
+    auto mix808Bus = getBusBuffer (buffer, false, 1);
+    auto mix909Bus = getBusBuffer (buffer, false, 2);
+    float* mix808L = mix808Bus.getNumChannels() > 0 ? mix808Bus.getWritePointer (0) : nullptr;
+    float* mix808R = mix808Bus.getNumChannels() > 1 ? mix808Bus.getWritePointer (1) : nullptr;
+    float* mix909L = mix909Bus.getNumChannels() > 0 ? mix909Bus.getWritePointer (0) : nullptr;
+    float* mix909R = mix909Bus.getNumChannels() > 1 ? mix909Bus.getWritePointer (1) : nullptr;
+
     float* auxPtr[kAuxBuses];
-    float* hostOut[kTotalCh];
+    float* hostOut[kTotalCh] {};
     hostOut[0] = mainL;
     hostOut[1] = mainR;
 
     auto attachAux = [&] (int i, float*& dest)
     {
-        auto bus = getBusBuffer (buffer, false, i + 1);
+        auto bus = getBusBuffer (buffer, false, i + kAuxBus0);
         dest = bus.getNumChannels() > 0 ? bus.getWritePointer (0) : scratch.getWritePointer (0);
     };
 
@@ -677,7 +752,12 @@ void ModloaderProcessor::processBuffer (juce::AudioBuffer<float>& buffer, bool b
     {
         for (int i = 0; i < kAuxBuses; ++i)
             attachAux (i, auxPtr[i]);
-        orb_modloader_process (engine_.get(), mainL, mainR, auxPtr, nHost, &params, &head);
+        orb_modloader_process (engine_.get(), mainL, mainR, mix808L, mix909L, auxPtr, nHost, &params, &head);
+        applyMainMute (mainL, mainR, mix808L, mix909L, params.direct_mix808 != 0, params.direct_mix909 != 0, nHost);
+        fillBusFrom (getBusBuffer (buffer, false, 1), mix808L, nHost);
+        fillBusFrom (getBusBuffer (buffer, false, 2), mix909L, nHost);
+        for (int i = 0; i < kAuxBuses; ++i)
+            fillBusFrom (getBusBuffer (buffer, false, i + kAuxBus0), auxPtr[i], nHost);
         return;
     }
 
@@ -686,17 +766,31 @@ void ModloaderProcessor::processBuffer (juce::AudioBuffer<float>& buffer, bool b
         (int) std::ceil ((double) nHost * kEngineRate / hostRate) + 4);
 
     float* engAux[kAuxBuses];
+    hostOut[2] = mix808L;
+    hostOut[3] = mix808R;
+    hostOut[4] = mix909L;
+    hostOut[5] = mix909R;
     for (int i = 0; i < kAuxBuses; ++i)
     {
-        engAux[i] = engineBuf.getWritePointer (i + 2);
-        auto bus = getBusBuffer (buffer, false, i + 1);
-        hostOut[i + 2] = bus.getNumChannels() > 0 ? bus.getWritePointer (0) : nullptr;
+        engAux[i] = engineBuf.getWritePointer (i + 2 + kMixChannels);
+        auto bus = getBusBuffer (buffer, false, i + kAuxBus0);
+        hostOut[i + 2 + kMixChannels] = bus.getNumChannels() > 0 ? bus.getWritePointer (0) : nullptr;
     }
     if (nEngine > 0)
+    {
+        float* eng808 = engineBuf.getWritePointer (2);
+        float* eng909 = engineBuf.getWritePointer (4);
         orb_modloader_process (engine_.get(), engineBuf.getWritePointer (0), engineBuf.getWritePointer (1),
-                               engAux, nEngine, &params, &head);
+                               eng808, eng909, engAux, nEngine, &params, &head);
+        std::memcpy (engineBuf.getWritePointer (3), eng808, (size_t) nEngine * sizeof (float));
+        std::memcpy (engineBuf.getWritePointer (5), eng909, (size_t) nEngine * sizeof (float));
+        applyMainMute (engineBuf.getWritePointer (0), engineBuf.getWritePointer (1), eng808, eng909,
+                       params.direct_mix808 != 0, params.direct_mix909 != 0, nEngine);
+    }
 
     engineToHost (hostOut, nHost, nEngine, kTotalCh);
+    for (int i = 0; i < kAuxBuses; ++i)
+        fillBusFrom (getBusBuffer (buffer, false, i + kAuxBus0), hostOut[i + 2 + kMixChannels], nHost);
 }
 
 void ModloaderProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)

@@ -31,7 +31,7 @@ use song::SongInfo;
 pub const ENGINE_RATE: f64 = 44100.0;
 /// Fallback tempo when the host has none, as BPM*1000.
 pub const DEFAULT_TEMPO_MILLI: u32 = 120_000;
-/// Aux buses: 11 instruments per machine.
+/// Instrument aux buses: 11 per machine. Machine Mix buses are separate.
 pub const AUX: usize = 22;
 /// Controllers 0..=28 of the 808.
 pub const P808: usize = 29;
@@ -57,6 +57,10 @@ pub struct Params {
     pub mix808: u8,
     /// Mixer channel level of the 909 (ReBirth MIXR channel 3, 0..=127, default 100).
     pub mix909: u8,
+    /// Omit the 808 Mix from the main Output (3/4 still has it).
+    pub direct_mix808: u8,
+    /// Omit the 909 Mix from the main Output (5/6 still has it).
+    pub direct_mix909: u8,
 }
 
 impl Default for Params {
@@ -73,6 +77,8 @@ impl Default for Params {
             bypass: 0,
             mix808: 100,
             mix909: 100,
+            direct_mix808: 0,
+            direct_mix909: 0,
         }
     }
 }
@@ -171,6 +177,12 @@ const MIX_RAMP: f64 = f64::from_bits(0x3FA0_0000_0000_0000);
 fn mixer_target(level: u8, curve: &[f32; 128]) -> f32 {
     let i = (level as usize).min(127);
     (GUARD as f64 + curve[i] as f64) as f32
+}
+
+fn copy_delay(dst: &mut [f32], src: &[f32; BLOCK], i: usize, fill: usize, take: usize) {
+    if i + take <= dst.len() {
+        dst[i..i + take].copy_from_slice(&src[fill..fill + take]);
+    }
 }
 
 /// Mixer channel gain: `T[level] + 1e-6` at pan centre, smoothed like `sub_10013444`.
@@ -315,8 +327,12 @@ pub struct Modloader {
     tr909: tr909::Tr909,
     retired: Option<Retired>,
     work_main: Block,
+    work_mix808: Block,
+    work_mix909: Block,
     work_aux: [Block; AUX],
     delay_main: Block,
+    delay_mix808: Block,
+    delay_mix909: Block,
     delay_aux: [Block; AUX],
     fill: usize,
     pos: f64,
@@ -359,8 +375,12 @@ impl Modloader {
             tr909: tr909::Tr909::new(samples, process),
             retired: None,
             work_main: [0.0; BLOCK],
+            work_mix808: [0.0; BLOCK],
+            work_mix909: [0.0; BLOCK],
             work_aux: [[0.0; BLOCK]; AUX],
             delay_main: [0.0; BLOCK],
+            delay_mix808: [0.0; BLOCK],
+            delay_mix909: [0.0; BLOCK],
             delay_aux: [[0.0; BLOCK]; AUX],
             fill: 0,
             pos: 0.0,
@@ -388,8 +408,12 @@ impl Modloader {
     /// hosts call this on bus connect and on prepareToPlay.
     pub fn reset(&mut self) {
         self.work_main = [0.0; BLOCK];
+        self.work_mix808 = [0.0; BLOCK];
+        self.work_mix909 = [0.0; BLOCK];
         self.work_aux = [[0.0; BLOCK]; AUX];
         self.delay_main = [0.0; BLOCK];
+        self.delay_mix808 = [0.0; BLOCK];
+        self.delay_mix909 = [0.0; BLOCK];
         self.delay_aux = [[0.0; BLOCK]; AUX];
         self.fill = 0;
         self.restart_clock();
@@ -420,6 +444,8 @@ impl Modloader {
         &mut self,
         main_l: &mut [f32],
         main_r: &mut [f32],
+        mix808: &mut [f32],
+        mix909: &mut [f32],
         aux: &mut [&mut [f32]],
         params: Params,
         playhead: Playhead,
@@ -434,6 +460,8 @@ impl Modloader {
             let take = (n - i).min(BLOCK - self.fill);
             main_l[i..i + take].copy_from_slice(&self.delay_main[self.fill..self.fill + take]);
             main_r[i..i + take].copy_from_slice(&self.delay_main[self.fill..self.fill + take]);
+            copy_delay(mix808, &self.delay_mix808, i, self.fill, take);
+            copy_delay(mix909, &self.delay_mix909, i, self.fill, take);
             for (ch, bus) in aux.iter_mut().enumerate().take(AUX) {
                 if i + take <= bus.len() {
                     bus[i..i + take]
@@ -452,16 +480,16 @@ impl Modloader {
 
                 let mut v808 = [[0.0f32; BLOCK]; tr808::VOICES];
                 let mut v909 = [[0.0f32; BLOCK]; tr909::VOICES];
-                let mut mix808 = [0.0f32; BLOCK];
-                let mut mix909 = [0.0f32; BLOCK];
+                let mut mix808_sum = [0.0f32; BLOCK];
+                let mut mix909_sum = [0.0f32; BLOCK];
                 let mut d808 = [false; tr808::VOICES];
                 let mut d909 = [false; tr909::VOICES];
                 for i in 0..tr808::VOICES {
                     d808[i] = params.direct[i] != 0;
                     d909[i] = params.direct[tr808::VOICES + i] != 0;
                 }
-                self.tr808.process_mix(&mut mix808, &mut v808, &d808);
-                self.tr909.process_mix(&mut mix909, &mut v909, &d909);
+                self.tr808.process_mix(&mut mix808_sum, &mut v808, &d808);
+                self.tr909.process_mix(&mut mix909_sum, &mut v909, &d909);
 
                 let t808 = mixer_target(params.mix808, &self.mix_level);
                 let t909 = mixer_target(params.mix909, &self.mix_level);
@@ -470,15 +498,23 @@ impl Modloader {
                     self.gain_909 = t909;
                     self.mix_primed = true;
                 }
-                let (g808, scaled808) = mix_channel(&mix808, self.gain_808, t808);
-                let (g909, scaled909) = mix_channel(&mix909, self.gain_909, t909);
+                let (g808, scaled808) = mix_channel(&mix808_sum, self.gain_808, t808);
+                let (g909, scaled909) = mix_channel(&mix909_sum, self.gain_909, t909);
                 self.gain_808 = g808;
                 self.gain_909 = g909;
 
                 if params.bypass == 0 {
                     for s in 0..BLOCK {
-                        self.work_main[s] = scaled808[s] + scaled909[s];
+                        self.work_main[s] = 0.0;
+                        if params.direct_mix808 == 0 {
+                            self.work_main[s] += scaled808[s];
+                        }
+                        if params.direct_mix909 == 0 {
+                            self.work_main[s] += scaled909[s];
+                        }
                     }
+                    self.work_mix808 = scaled808;
+                    self.work_mix909 = scaled909;
                     for (i, v) in v808.iter().enumerate() {
                         self.work_aux[i] = *v;
                     }
@@ -487,6 +523,8 @@ impl Modloader {
                     }
                 } else {
                     self.work_main = [0.0; BLOCK];
+                    self.work_mix808 = [0.0; BLOCK];
+                    self.work_mix909 = [0.0; BLOCK];
                     self.work_aux = [[0.0; BLOCK]; AUX];
                 }
 
@@ -495,6 +533,8 @@ impl Modloader {
                 }
                 self.last_tick = Some(tick);
                 std::mem::swap(&mut self.work_main, &mut self.delay_main);
+                std::mem::swap(&mut self.work_mix808, &mut self.delay_mix808);
+                std::mem::swap(&mut self.work_mix909, &mut self.delay_mix909);
                 std::mem::swap(&mut self.work_aux, &mut self.delay_aux);
                 self.fill = 0;
                 self.blocks_processed += 1;
@@ -844,12 +884,15 @@ pub extern "C" fn orb_modloader_latency() -> i32 {
 
 /// # Safety
 /// `m` is a pointer from [`orb_modloader_new`]. `main_l` and `main_r` each have `nframes`
-/// samples when `nframes > 0`. `aux` is 22 pointers, each `nframes`, or null to skip aux.
+/// samples when `nframes > 0`. `mix808` and `mix909` are each `nframes`, or null to skip
+/// that machine mix. `aux` is 22 pointers, each `nframes`, or null to skip aux.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn orb_modloader_process(
     m: *mut Modloader,
     main_l: *mut f32,
     main_r: *mut f32,
+    mix808: *mut f32,
+    mix909: *mut f32,
     aux: *const *mut f32,
     nframes: i32,
     params: *const Params,
@@ -864,6 +907,18 @@ pub unsafe extern "C" fn orb_modloader_process(
     let n = nframes as usize;
     let main_l = unsafe { std::slice::from_raw_parts_mut(main_l, n) };
     let main_r = unsafe { std::slice::from_raw_parts_mut(main_r, n) };
+    let mut skip808: [f32; 0] = [];
+    let mut skip909: [f32; 0] = [];
+    let mix808 = if mix808.is_null() {
+        skip808.as_mut_slice()
+    } else {
+        unsafe { std::slice::from_raw_parts_mut(mix808, n) }
+    };
+    let mix909 = if mix909.is_null() {
+        skip909.as_mut_slice()
+    } else {
+        unsafe { std::slice::from_raw_parts_mut(mix909, n) }
+    };
     let params = unsafe { params.as_ref() }.copied().unwrap_or_default();
     let playhead = unsafe { playhead.as_ref() }
         .copied()
@@ -872,7 +927,7 @@ pub unsafe extern "C" fn orb_modloader_process(
 
     if aux.is_null() {
         let mut empty: [&mut [f32]; 0] = [];
-        p.process(main_l, main_r, &mut empty, params, playhead);
+        p.process(main_l, main_r, mix808, mix909, &mut empty, params, playhead);
         return;
     }
     let ptrs = unsafe { std::slice::from_raw_parts(aux, AUX) };
@@ -880,12 +935,12 @@ pub unsafe extern "C" fn orb_modloader_process(
     for &ptr in ptrs {
         if ptr.is_null() {
             let mut empty: [&mut [f32]; 0] = [];
-            p.process(main_l, main_r, &mut empty, params, playhead);
+            p.process(main_l, main_r, mix808, mix909, &mut empty, params, playhead);
             return;
         }
         aux_vec.push(unsafe { std::slice::from_raw_parts_mut(ptr, n) });
     }
-    p.process(main_l, main_r, &mut aux_vec, params, playhead);
+    p.process(main_l, main_r, mix808, mix909, &mut aux_vec, params, playhead);
 }
 
 /// # Safety

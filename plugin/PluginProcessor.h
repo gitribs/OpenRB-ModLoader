@@ -4,6 +4,7 @@
 #include "orb_modloader.h"
 
 #include <array>
+#include <atomic>
 #include <memory>
 
 class ModloaderEditor;
@@ -12,6 +13,9 @@ class ModloaderProcessor final : public juce::AudioProcessor
 {
 public:
     static constexpr int kAuxBuses = ORB_MODLOADER_AUX;
+    static constexpr int kMachineBuses = 2;
+    static constexpr int kMixChannels = kMachineBuses * 2;
+    static constexpr int kAuxBus0 = 1 + kMachineBuses;
     static constexpr int kPatternBytes = ORB_MODLOADER_PATTERN_BYTES;
     static constexpr int kPatternLen = kPatternBytes / 32;
 
@@ -80,6 +84,7 @@ public:
     static juce::String p808Id (int ctrl);
     static juce::String p909Id (int ctrl);
     static juce::String directId (int aux);
+    static juce::String mixDirectId (int machine);
 
 private:
     struct EngineDeleter
@@ -97,18 +102,21 @@ private:
     void engineToHost (float* const* hostOut, int nHost, int nEngine, int nCh);
     void shiftFifo (juce::AudioBuffer<float>& fifo, int& fill, int used);
     int asInt (const juce::String& id, int fallback) const;
+    static uint8_t flagOf (const std::atomic<float>* v);
 
     void applySongParams (const OrbModloaderSong& song);
     void fillSongParams (OrbModloaderSong& song) const;
 
     std::unique_ptr<OrbModloader, EngineDeleter> engine_;
+    std::atomic<float>* muteMain808 = nullptr;
+    std::atomic<float>* muteMain909 = nullptr;
     juce::File songFile;
     juce::String songModName;
     double hostRate = 44100.0;
     bool exact44100 = true;
     int maxHostBlock = 0;
 
-    static constexpr int kTotalCh = 2 + kAuxBuses;
+    static constexpr int kTotalCh = 2 + kMixChannels + kAuxBuses;
     juce::WindowedSincInterpolator toHost[kTotalCh];
     juce::AudioBuffer<float> engineBuf;
     juce::AudioBuffer<float> engineFifo;

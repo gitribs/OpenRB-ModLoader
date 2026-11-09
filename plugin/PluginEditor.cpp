@@ -213,6 +213,16 @@ int toggleContentWidth (const juce::ToggleButton& button, int height)
     const int textW = juce::GlyphArrangement::getStringWidthInt (font, button.getButtonText());
     return juce::roundToInt (tickWidth) + textW + 16;
 }
+
+juce::Font captionFont()
+{
+    return juce::Font { juce::FontOptions().withHeight (11.0f).withStyle ("Bold") };
+}
+
+int captionLabelWidth (const juce::String& text)
+{
+    return juce::GlyphArrangement::getStringWidthInt (captionFont(), text);
+}
 } // namespace
 
 void ModSlider::mouseDown (const juce::MouseEvent& e)
@@ -1096,6 +1106,10 @@ ModloaderEditor::ModloaderEditor (ModloaderProcessor& p)
     addLabel (status, {}, kMuted, 12.0f);
     addLabel (shuffleN, "SHUFFLE", kMuted, 11.0f);
     shuffleN.setJustificationType (juce::Justification::centredRight);
+    addLabel (mixMuteN, "MUTE", kMuted, 11.0f);
+    mixMuteN.setJustificationType (juce::Justification::centredRight);
+    mixMuteN.setBorderSize ({});
+    mixMuteN.setTooltip ("Omit the focused machine from the main mix");
     addLabel (flamN, "FLAM", kMuted, 11.0f);
     flamN.setJustificationType (juce::Justification::centredLeft);
     modName.setJustificationType (juce::Justification::centredLeft);
@@ -1139,6 +1153,12 @@ ModloaderEditor::ModloaderEditor (ModloaderProcessor& p)
             orb_modloader_set_pat_shuffle (e, focusedMachine, currentPattern (focusedMachine),
                                            shuffleOn.getToggleState() ? 1 : 0);
     };
+    mixMuteOn.setClickingTogglesState (true);
+    mixMuteOn.setButtonText ({});
+    mixMuteOn.setColour (juce::ToggleButton::textColourId, kMuted);
+    mixMuteOn.setTooltip ("Omit the focused machine from the main mix");
+    addAndMakeVisible (mixMuteOn);
+    mixMuteOn.onClick = [this] { setMixMute (mixMuteOn.getToggleState()); };
 
     setupPatternSection (0);
     setupPatternSection (1);
@@ -1459,6 +1479,7 @@ void ModloaderEditor::refreshPatternHeader()
     if (e == nullptr)
     {
         refreshShuffle();
+        refreshMixMute();
         return;
     }
     for (int machine = 0; machine < 2; ++machine)
@@ -1473,6 +1494,7 @@ void ModloaderEditor::refreshPatternHeader()
                                juce::dontSendNotification);
     }
     refreshShuffle();
+    refreshMixMute();
 }
 
 void ModloaderEditor::refreshShuffle()
@@ -1483,6 +1505,28 @@ void ModloaderEditor::refreshShuffle()
     const bool on = have
                     && orb_modloader_get_pat_shuffle (e, focusedMachine, currentPattern (focusedMachine)) != 0;
     shuffleOn.setToggleState (on, juce::dontSendNotification);
+}
+
+void ModloaderEditor::refreshMixMute()
+{
+    const bool have = focusedMachine >= 0;
+    mixMuteOn.setEnabled (have);
+    mixMuteN.setEnabled (have);
+    mixMuteN.setColour (juce::Label::textColourId, have ? kMuted : kMuted.withAlpha (0.5f));
+    bool on = false;
+    if (have)
+        if (auto* v = proc.apvts.getRawParameterValue (ModloaderProcessor::mixDirectId (focusedMachine)))
+            on = v->load() >= 0.5f;
+    mixMuteOn.setToggleState (on, juce::dontSendNotification);
+}
+
+void ModloaderEditor::setMixMute (bool on)
+{
+    if (focusedMachine < 0)
+        return;
+    if (auto* param = proc.apvts.getParameter (ModloaderProcessor::mixDirectId (focusedMachine)))
+        param->setValueNotifyingHost (on ? 1.0f : 0.0f);
+    refreshMixMute();
 }
 
 void ModloaderEditor::sync808Radios()
@@ -1594,6 +1638,8 @@ void ModloaderEditor::handleNestedMouseDown (const juce::MouseEvent& e)
         updateMachineFocus (e.getEventRelativeTo (this).getPosition());
     if (! e.mods.isPopupMenu() && e.eventComponent == &modName)
         toggleModPicker();
+    if (! e.mods.isPopupMenu() && e.eventComponent == &mixMuteN && mixMuteN.isEnabled())
+        setMixMute (! mixMuteOn.getToggleState());
 }
 
 void ModloaderEditor::toggleModPicker()
@@ -2171,6 +2217,7 @@ void ModloaderEditor::updateMachineFocus (juce::Point<int> pos)
         return;
     focusedMachine = next;
     refreshShuffle();
+    refreshMixMute();
     repaint();
 }
 
@@ -2326,6 +2373,10 @@ void ModloaderEditor::resized()
     constexpr int shuffleTick = 22;
     shuffleOn.setBounds (top.removeFromRight (shuffleTick).withSizeKeepingCentre (shuffleTick, shuffleTick));
     shuffleN.setBounds (top.removeFromRight (56));
+    top.removeFromRight (30);
+    mixMuteOn.setBounds (top.removeFromRight (shuffleTick).withSizeKeepingCentre (shuffleTick, shuffleTick));
+    const int muteLabelW = captionLabelWidth ("MUTE") + 2;
+    mixMuteN.setBounds (top.removeFromRight (muteLabelW).withSizeKeepingCentre (muteLabelW, 14));
     status.setBounds (top.withY (bandY).withHeight (bandH));
 
     auto placePattern = [this] (PatternUi& ui, juce::Rectangle<int> r, bool withFlam, bool withSplash)

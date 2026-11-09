@@ -14,6 +14,9 @@ extern "C" {
 
 typedef struct OrbModloader OrbModloader;
 
+#if defined(_MSC_VER)
+#pragma pack(push, 1)
+#endif
 typedef struct OrbModloaderParams {
     uint8_t p808[ORB_MODLOADER_P808];
     uint8_t p909[ORB_MODLOADER_P909];
@@ -22,7 +25,16 @@ typedef struct OrbModloaderParams {
     uint8_t bypass;
     uint8_t mix808;
     uint8_t mix909;
-} OrbModloaderParams;
+    uint8_t direct_mix808;
+    uint8_t direct_mix909;
+}
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__ ((packed))
+#endif
+OrbModloaderParams;
+#if defined(_MSC_VER)
+#pragma pack(pop)
+#endif
 
 typedef struct OrbModloaderPlayhead {
     double bpm;
@@ -49,6 +61,8 @@ int32_t orb_modloader_latency(void);
 void orb_modloader_process(OrbModloader *m,
                            float *main_l,
                            float *main_r,
+                           float *mix808,
+                           float *mix909,
                            float *const *aux,
                            int32_t nframes,
                            const OrbModloaderParams *params,

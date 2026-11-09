@@ -1,5 +1,5 @@
-# Extra synth outs as VST3 kAux, and AU 0-channel as a valid disable. Hosts still
-# often leave unused extras enabled; Mix omit is a panel control, not bus state.
+# Output / 808 Mix / 909 Mix are VST3 kMain. Drum-slot extras are kAux, and AU
+# 0-channel is a valid disable. Mix omit is a panel control, not bus state.
 
 function(orb_replace_in_file file old new already)
     if(NOT EXISTS "${file}")
@@ -31,9 +31,18 @@ orb_replace_in_file(
                    #else
                     return isFirstBus ? Vst::kMain : Vst::kAux;
                    #endif"
+    "                    // OpenRB: Output, 808 Mix, and 909 Mix are kMain. Drum slots stay kAux.
+                    return (index < 3) ? Vst::kMain : Vst::kAux;"
+    "OpenRB: Output, 808 Mix, and 909 Mix are kMain"
+)
+
+orb_replace_in_file(
+    "${juce_SOURCE_DIR}/modules/juce_audio_plugin_client/juce_audio_plugin_client_VST3.cpp"
     "                    // OpenRB: extra synth outs as kAux so hosts deactivate them on disconnect.
                     return isFirstBus ? Vst::kMain : Vst::kAux;"
-    "OpenRB: extra synth outs as kAux"
+    "                    // OpenRB: Output, 808 Mix, and 909 Mix are kMain. Drum slots stay kAux.
+                    return (index < 3) ? Vst::kMain : Vst::kAux;"
+    "OpenRB: Output, 808 Mix, and 909 Mix are kMain"
 )
 
 orb_replace_in_file(

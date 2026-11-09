@@ -55,18 +55,38 @@ fn playing(ppq: f64) -> Playhead {
     }
 }
 
+fn run_all(
+    m: &mut Modloader,
+    params: Params,
+    playhead: Playhead,
+    n: usize,
+) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<Vec<f32>>) {
+    let mut left = vec![0.0f32; n];
+    let mut right = vec![0.0f32; n];
+    let mut mix808 = vec![0.0f32; n];
+    let mut mix909 = vec![0.0f32; n];
+    let mut aux_store = vec![vec![0.0f32; n]; AUX];
+    let mut aux_refs: Vec<&mut [f32]> = aux_store.iter_mut().map(|v| v.as_mut_slice()).collect();
+    m.process(
+        &mut left,
+        &mut right,
+        &mut mix808,
+        &mut mix909,
+        &mut aux_refs,
+        params,
+        playhead,
+    );
+    (left, mix808, mix909, aux_store)
+}
+
 fn run(
     m: &mut Modloader,
     params: Params,
     playhead: Playhead,
     n: usize,
 ) -> (Vec<f32>, Vec<Vec<f32>>) {
-    let mut left = vec![0.0f32; n];
-    let mut right = vec![0.0f32; n];
-    let mut aux_store = vec![vec![0.0f32; n]; AUX];
-    let mut aux_refs: Vec<&mut [f32]> = aux_store.iter_mut().map(|v| v.as_mut_slice()).collect();
-    m.process(&mut left, &mut right, &mut aux_refs, params, playhead);
-    (left, aux_store)
+    let (left, _, _, aux) = run_all(m, params, playhead, n);
+    (left, aux)
 }
 
 fn energy(buf: &[f32]) -> f32 {
@@ -171,7 +191,7 @@ fn pattern_shuffle_delays_offbeat() {
 }
 
 /// Mixer channel level is the original 808/909 volume fader: it scales the stereo mix
-/// with ReBirth's level curve and leaves the aux buses alone.
+/// and that machine's Mix bus with ReBirth's level curve, and leaves the aux buses alone.
 #[test]
 fn mixer_volume_scales_main_mix() {
     let n = BLOCK * 8;
@@ -203,6 +223,127 @@ fn mixer_volume_scales_main_mix() {
             && energy(&aux_off[tr808::VOICE_BD][BLOCK..]) > 0.0,
         "aux buses are independent of the mixer fader"
     );
+}
+
+/// Each machine Mix bus is the mixer-scaled sum of that machine, so main = 808 Mix + 909 Mix.
+#[test]
+fn machine_mix_buses_split_the_sum() {
+    let n = BLOCK * 8;
+    let mut m = Modloader::new();
+    m.set_step(0, 0, 0, tr808::BD as u8, 1);
+    m.set_step(1, 0, 0, tr909::BD as u8, 1);
+    let mut params = Params::default();
+    params.p808[tr808::ENABLED] = 1;
+    params.p808[tr808::BD_LEVEL] = 127;
+    params.p808[tr808::ACCENT] = 127;
+    params.p909[tr909::ENABLED] = 1;
+    params.p909[tr909::BD_LEVEL] = 127;
+    params.p909[tr909::ACCENT] = 127;
+    params.mix808 = 100;
+    params.mix909 = 100;
+    let (left, mix808, mix909, _) = run_all(&mut m, params, playing(0.0), n);
+    assert!(energy(&mix808[BLOCK..]) > 0.0, "808 Mix has the 808");
+    assert!(energy(&mix909[BLOCK..]) > 0.0, "909 Mix has the 909");
+    for i in BLOCK..n {
+        let sum = mix808[i] + mix909[i];
+        assert!(
+            (left[i] - sum).abs() < 1.0e-5,
+            "main is 808 Mix + 909 Mix at {i}"
+        );
+    }
+
+    let mut only808 = Modloader::new();
+    only808.set_step(0, 0, 0, tr808::BD as u8, 1);
+    let mut p808 = Params::default();
+    p808.p808[tr808::ENABLED] = 1;
+    p808.p808[tr808::BD_LEVEL] = 127;
+    p808.p808[tr808::ACCENT] = 127;
+    p808.mix909 = 0;
+    let (_, mix808_only, mix909_only, _) = run_all(&mut only808, p808, playing(0.0), n);
+    assert!(energy(&mix808_only[BLOCK..]) > 0.0);
+    assert!(
+        energy(&mix909_only[BLOCK..]) == 0.0,
+        "808 does not leak onto 909 Mix"
+    );
+
+    let mut muted = Modloader::new();
+    muted.set_step(0, 0, 0, tr808::BD as u8, 1);
+    let mut p_mute = p808;
+    p_mute.mix808 = 0;
+    let (_, mix_off, _, aux_off) = run_all(&mut muted, p_mute, playing(0.0), n);
+    assert!(
+        energy(&mix_off[BLOCK..]) < energy(&mix808_only[BLOCK..]) * 1.0e-3,
+        "mixer 0 silences 808 Mix"
+    );
+    assert!(
+        energy(&aux_off[tr808::VOICE_BD][BLOCK..]) > 0.0,
+        "instrument aux is independent of the mixer fader"
+    );
+
+    let mut routed = Modloader::new();
+    routed.set_step(0, 0, 0, tr808::BD as u8, 1);
+    let mut p_dir = p808;
+    p_dir.direct[tr808::VOICE_BD] = 1;
+    let (_, mix_dir, _, aux_dir) = run_all(&mut routed, p_dir, playing(0.0), n);
+    assert!(
+        energy(&mix_dir[BLOCK..]) == 0.0,
+        "direct omits the instrument from 808 Mix"
+    );
+    assert!(energy(&aux_dir[tr808::VOICE_BD][BLOCK..]) > 0.0);
+}
+
+/// Muting a machine from the main Output leaves that machine's Mix bus intact.
+#[test]
+fn machine_direct_omits_from_main_keeps_mix() {
+    let n = BLOCK * 8;
+    let mut m = Modloader::new();
+    m.set_step(0, 0, 0, tr808::BD as u8, 1);
+    let mut params = Params::default();
+    params.p808[tr808::ENABLED] = 1;
+    params.p808[tr808::BD_LEVEL] = 127;
+    params.p808[tr808::ACCENT] = 127;
+    params.direct_mix808 = 1;
+    let (left, mix808, mix909, _) = run_all(&mut m, params, playing(0.0), n);
+    assert!(
+        energy(&mix808[BLOCK..]) > 0.0,
+        "808 Mix still has the machine"
+    );
+    assert!(energy(&mix909[BLOCK..]) == 0.0);
+    assert!(
+        energy(&left[BLOCK..]) == 0.0,
+        "direct mix omits the 808 from the main Output"
+    );
+}
+
+#[test]
+fn machine_direct_omits_909_from_main_keeps_mix() {
+    let n = BLOCK * 8;
+    let mut m = Modloader::new();
+    m.set_step(1, 0, 0, tr909::BD as u8, 1);
+    let mut params = Params::default();
+    params.p909[tr909::ENABLED] = 1;
+    params.p909[tr909::BD_LEVEL] = 127;
+    params.p909[tr909::ACCENT] = 127;
+    params.direct_mix909 = 1;
+    let (left, mix808, mix909, _) = run_all(&mut m, params, playing(0.0), n);
+    assert!(energy(&mix808[BLOCK..]) == 0.0);
+    assert!(
+        energy(&mix909[BLOCK..]) > 0.0,
+        "909 Mix still has the machine"
+    );
+    assert!(
+        energy(&left[BLOCK..]) == 0.0,
+        "direct mix omits the 909 from the main Output"
+    );
+}
+
+#[test]
+fn params_c_layout() {
+    assert_eq!(std::mem::size_of::<Params>(), 87);
+    assert_eq!(std::mem::offset_of!(Params, mix808), 83);
+    assert_eq!(std::mem::offset_of!(Params, mix909), 84);
+    assert_eq!(std::mem::offset_of!(Params, direct_mix808), 85);
+    assert_eq!(std::mem::offset_of!(Params, direct_mix909), 86);
 }
 
 /// Direct omits that instrument from the main sum; the aux bus still has it.

@@ -132,8 +132,10 @@ private:
     void refreshSongLabel();
     void refreshPatternHeader();
     void refreshShuffle();
+    void refreshMixMute();
     void refreshSplash();
     void refreshDisable();
+    void setMixMute (bool on);
     void updateSplashCursor (juce::Point<int> pos);
     void showSplash();
     void hideSplash();
@@ -183,7 +185,7 @@ private:
     ModloaderProcessor& proc;
     ModloaderLookAndFeel lnf;
 
-    juce::Label title, modName, songName, status, shuffleN, flamN;
+    juce::Label title, modName, songName, status, shuffleN, mixMuteN, flamN;
     IncDecArrowButton modUp { true }, modDown { false };
     HeaderIconButton songOpenBtn { HeaderIconButton::Kind::Open };
     HeaderIconButton songSaveBtn { HeaderIconButton::Kind::Save };
@@ -191,6 +193,7 @@ private:
     ModSlider shuffle;
     juce::AudioProcessorValueTreeState::SliderAttachment shuffleA;
     ModToggleButton shuffleOn;
+    ModToggleButton mixMuteOn;
     ModSlider vol808, vol909;
     juce::AudioProcessorValueTreeState::SliderAttachment vol808A, vol909A;
 
