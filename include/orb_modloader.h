@@ -51,6 +51,26 @@ typedef struct OrbModloaderSong {
     uint8_t mix808;
     uint8_t mix909;
     char mod_name[ORB_MODLOADER_MOD_NAME];
+    uint8_t dist_enabled;
+    uint8_t dist_amount;
+    uint8_t dist_shape;
+    uint8_t dist_808;
+    uint8_t dist_909;
+    uint8_t pcf_enabled;
+    uint8_t pcf_frequency;
+    uint8_t pcf_resonance;
+    uint8_t pcf_amount;
+    uint8_t pcf_wave;
+    uint8_t pcf_decay;
+    uint8_t pcf_mode;
+    uint8_t pcf_id;
+    uint8_t delay_enabled;
+    uint8_t delay_steps;
+    uint8_t delay_mode;
+    uint8_t delay_feedback;
+    uint8_t delay_pan;
+    uint8_t delay_send_808;
+    uint8_t delay_send_909;
 } OrbModloaderSong;
 
 OrbModloader *orb_modloader_new(void);

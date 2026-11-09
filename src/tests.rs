@@ -346,6 +346,14 @@ fn params_c_layout() {
     assert_eq!(std::mem::offset_of!(Params, direct_mix909), 86);
 }
 
+#[test]
+fn song_info_c_layout() {
+    use crate::song::SongInfo;
+    assert_eq!(std::mem::size_of::<SongInfo>(), 147);
+    assert_eq!(std::mem::offset_of!(SongInfo, dist_enabled), 127);
+    assert_eq!(std::mem::offset_of!(SongInfo, delay_send_909), 146);
+}
+
 /// Direct omits that instrument from the main sum; the aux bus still has it.
 #[test]
 fn direct_omitted_from_sum() {
@@ -522,6 +530,59 @@ fn rbs_song_roundtrip_drums() {
     assert_eq!(loaded.get_pat_length(0, 1), 12);
     assert_eq!(loaded.get_pat_shuffle(1, 7), 1);
     assert_eq!(loaded.get_step(0, 0, 1, tr808::BD as u8), 0);
+    assert_eq!(got.dist_enabled, 0);
+    assert_eq!(got.pcf_id, 0);
+    assert_eq!(got.delay_send_808, 0);
+}
+
+/// Distortion / PCF / Delay mixer routing is kept on load and written back on save.
+#[test]
+fn rbs_song_keeps_effect_snapshot() {
+    let mut file = rbs::Song::empty();
+    file.dist.values = vec![1, 35, 62];
+    file.pcf.values = vec![1, 20, 42, 50, 24, 90, 1];
+    file.delay.values = vec![1, 8, 0, 70, 64];
+    file.mixer.channels[2].dist = 1;
+    file.mixer.channels[2].level = 80;
+    file.mixer.pcf_id = 4;
+    file.mixer.channels[3].delay_send = 22;
+
+    let bytes = file.write().expect("write rbs");
+    let mut m = Modloader::new();
+    let info = m.load_song(&bytes).expect("load rbs");
+    assert_eq!(info.dist_enabled, 1);
+    assert_eq!(info.dist_amount, 35);
+    assert_eq!(info.dist_shape, 62);
+    assert_eq!(info.dist_808, 1);
+    assert_eq!(info.dist_909, 0);
+    assert_eq!(info.pcf_enabled, 1);
+    assert_eq!(info.pcf_frequency, 20);
+    assert_eq!(info.pcf_resonance, 42);
+    assert_eq!(info.pcf_amount, 50);
+    assert_eq!(info.pcf_wave, 24);
+    assert_eq!(info.pcf_decay, 90);
+    assert_eq!(info.pcf_mode, 1);
+    assert_eq!(info.pcf_id, 4);
+    assert_eq!(info.delay_enabled, 1);
+    assert_eq!(info.delay_steps, 8);
+    assert_eq!(info.delay_mode, 0);
+    assert_eq!(info.delay_feedback, 70);
+    assert_eq!(info.delay_pan, 64);
+    assert_eq!(info.delay_send_808, 0);
+    assert_eq!(info.delay_send_909, 22);
+    assert_eq!(info.mix808, 80);
+
+    let out = m.save_song(&info).expect("save rbs");
+    let parsed = rbs::Song::parse(&out).expect("parse saved rbs");
+    assert_eq!(parsed.dist.values, vec![1, 35, 62]);
+    assert_eq!(parsed.pcf.values, vec![1, 20, 42, 50, 24, 90, 1]);
+    assert_eq!(parsed.delay.values, vec![1, 8, 0, 70, 64]);
+    assert_eq!(parsed.mixer.channels[2].dist, 1);
+    assert_eq!(parsed.mixer.channels[3].dist, 0);
+    assert_eq!(parsed.mixer.pcf_id, 4);
+    assert_eq!(parsed.mixer.channels[2].delay_send, 0);
+    assert_eq!(parsed.mixer.channels[3].delay_send, 22);
+    assert_eq!(parsed.mixer.channels[2].level, 80);
 }
 
 /// Files before 4.2 convert 808 tom tunings the way ReBirth 2.x does (`v/2 + 32`).

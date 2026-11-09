@@ -104,6 +104,15 @@ private:
     bool attention = false;
 };
 
+class FxBadgeButton final : public juce::Button
+{
+public:
+    FxBadgeButton();
+    void paintButton (juce::Graphics&, bool highlighted, bool down) override;
+    void mouseDown (const juce::MouseEvent&) override;
+    void mouseUp (const juce::MouseEvent&) override;
+};
+
 class ModloaderEditor final : public juce::AudioProcessorEditor,
                               private juce::Timer
 {
@@ -166,6 +175,11 @@ private:
     void chooseSongSave();
     void applyOpenedSong (const juce::File&);
     void finishSongLoad();
+    void refreshFxBadges();
+    void toggleEffectsRecall (int machine);
+    void showEffectsRecall (int machine);
+    void hideEffectsRecall();
+    void presentEffectsRecall (int machine);
     void showSongError (const juce::String& heading, const juce::String& message);
     void showContextMenu();
     void resetDevice();
@@ -236,6 +250,7 @@ private:
     std::array<StepLed, 16> led909;
     ModToggleButton flamEntry;
     ModToggleButton disable808 { "MUTE" }, disable909 { "MUTE" };
+    FxBadgeButton fx808, fx909;
     int sel909 = 1;
     int focusedMachine = -1;
     juce::Image splashImage;
@@ -263,9 +278,11 @@ private:
     class ModPicker;
     class SettingsPanel;
     class SplashViewer;
+    class EffectsRecallPanel;
     std::unique_ptr<ModPicker> modPicker;
     std::unique_ptr<SettingsPanel> settingsPanel;
     std::unique_ptr<SplashViewer> splashViewer;
+    std::unique_ptr<EffectsRecallPanel> effectsPanel;
     std::unique_ptr<juce::FileChooser> chooser;
     bool fileChooserOpen = false;
 

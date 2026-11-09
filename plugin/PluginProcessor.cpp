@@ -11,6 +11,9 @@ static_assert (offsetof (OrbModloaderParams, mix909) == 84);
 static_assert (offsetof (OrbModloaderParams, direct_mix808) == 85);
 static_assert (offsetof (OrbModloaderParams, direct_mix909) == 86);
 static_assert (sizeof (OrbModloaderParams) == 87);
+static_assert (offsetof (OrbModloaderSong, dist_enabled) == 127);
+static_assert (offsetof (OrbModloaderSong, delay_send_909) == 146);
+static_assert (sizeof (OrbModloaderSong) == 147);
 
 namespace
 {
@@ -96,6 +99,35 @@ void applyMainMute (float* mainL, float* mainR, const float* mix808, const float
         return;
     copyMono (mainL, src, n);
     copyMono (mainR, src, n);
+}
+
+void copySongFx (OrbModloaderSong& dest, const OrbModloaderSong& src)
+{
+    dest.dist_enabled = src.dist_enabled;
+    dest.dist_amount = src.dist_amount;
+    dest.dist_shape = src.dist_shape;
+    dest.dist_808 = src.dist_808;
+    dest.dist_909 = src.dist_909;
+    dest.pcf_enabled = src.pcf_enabled;
+    dest.pcf_frequency = src.pcf_frequency;
+    dest.pcf_resonance = src.pcf_resonance;
+    dest.pcf_amount = src.pcf_amount;
+    dest.pcf_wave = src.pcf_wave;
+    dest.pcf_decay = src.pcf_decay;
+    dest.pcf_mode = src.pcf_mode;
+    dest.pcf_id = src.pcf_id;
+    dest.delay_enabled = src.delay_enabled;
+    dest.delay_steps = src.delay_steps;
+    dest.delay_mode = src.delay_mode;
+    dest.delay_feedback = src.delay_feedback;
+    dest.delay_pan = src.delay_pan;
+    dest.delay_send_808 = src.delay_send_808;
+    dest.delay_send_909 = src.delay_send_909;
+}
+
+uint8_t fxByte (const juce::XmlElement& xml, const char* name)
+{
+    return (uint8_t) juce::jlimit (0, 255, xml.getIntAttribute (name, 0));
 }
 } // namespace
 
@@ -239,6 +271,19 @@ void ModloaderProcessor::resetDevice()
     }
     songFile = juce::File();
     songModName = {};
+    songEffects_ = {};
+}
+
+bool ModloaderProcessor::machineHasEffects (int machine) const
+{
+    const bool is808 = machine == 0;
+    const bool dist = songEffects_.dist_enabled != 0
+                      && (is808 ? songEffects_.dist_808 : songEffects_.dist_909) != 0;
+    const bool pcf = songEffects_.pcf_enabled != 0
+                     && songEffects_.pcf_id == (is808 ? 3 : 4);
+    const bool delay = songEffects_.delay_enabled != 0
+                       && (is808 ? songEffects_.delay_send_808 : songEffects_.delay_send_909) != 0;
+    return dist || pcf || delay;
 }
 
 juce::String ModloaderProcessor::songDisplayName() const
@@ -301,6 +346,7 @@ void ModloaderProcessor::fillSongParams (OrbModloaderSong& song) const
     orb_modloader_mod_name (engine_.get(), orb_modloader_current_mod (engine_.get()),
                             name, (int) sizeof name);
     std::strncpy (song.mod_name, name, sizeof song.mod_name - 1);
+    copySongFx (song, songEffects_);
 }
 
 bool ModloaderProcessor::loadSongFile (const juce::File& file, juce::String& error)
@@ -336,6 +382,8 @@ bool ModloaderProcessor::loadSongFile (const juce::File& file, juce::String& err
     }
 
     applySongParams (song);
+    songEffects_ = {};
+    copySongFx (songEffects_, song);
     songModName = juce::String::fromUTF8 (song.mod_name).trim();
     songFile = file;
     return true;
@@ -833,6 +881,26 @@ void ModloaderProcessor::getStateInformation (juce::MemoryBlock& destData)
         orb_modloader_mod_path (engine_.get(), orb_modloader_current_mod (engine_.get()), buf, (int) sizeof buf);
         xml->setAttribute ("modPath", juce::String::fromUTF8 (buf));
         xml->setAttribute ("songPath", songFile.getFullPathName());
+        xml->setAttribute ("fxDistEnabled", (int) songEffects_.dist_enabled);
+        xml->setAttribute ("fxDistAmount", (int) songEffects_.dist_amount);
+        xml->setAttribute ("fxDistShape", (int) songEffects_.dist_shape);
+        xml->setAttribute ("fxDist808", (int) songEffects_.dist_808);
+        xml->setAttribute ("fxDist909", (int) songEffects_.dist_909);
+        xml->setAttribute ("fxPcfEnabled", (int) songEffects_.pcf_enabled);
+        xml->setAttribute ("fxPcfFrequency", (int) songEffects_.pcf_frequency);
+        xml->setAttribute ("fxPcfResonance", (int) songEffects_.pcf_resonance);
+        xml->setAttribute ("fxPcfAmount", (int) songEffects_.pcf_amount);
+        xml->setAttribute ("fxPcfWave", (int) songEffects_.pcf_wave);
+        xml->setAttribute ("fxPcfDecay", (int) songEffects_.pcf_decay);
+        xml->setAttribute ("fxPcfMode", (int) songEffects_.pcf_mode);
+        xml->setAttribute ("fxPcfId", (int) songEffects_.pcf_id);
+        xml->setAttribute ("fxDelayEnabled", (int) songEffects_.delay_enabled);
+        xml->setAttribute ("fxDelaySteps", (int) songEffects_.delay_steps);
+        xml->setAttribute ("fxDelayMode", (int) songEffects_.delay_mode);
+        xml->setAttribute ("fxDelayFeedback", (int) songEffects_.delay_feedback);
+        xml->setAttribute ("fxDelayPan", (int) songEffects_.delay_pan);
+        xml->setAttribute ("fxDelaySend808", (int) songEffects_.delay_send_808);
+        xml->setAttribute ("fxDelaySend909", (int) songEffects_.delay_send_909);
     }
 
     copyXmlToBinary (*xml, destData);
@@ -895,6 +963,28 @@ void ModloaderProcessor::setStateInformation (const void* data, int sizeInBytes)
 
     const auto savedSong = xml->getStringAttribute ("songPath");
     songFile = savedSong.isNotEmpty() ? juce::File (savedSong) : juce::File();
+
+    songEffects_ = {};
+    songEffects_.dist_enabled = fxByte (*xml, "fxDistEnabled");
+    songEffects_.dist_amount = fxByte (*xml, "fxDistAmount");
+    songEffects_.dist_shape = fxByte (*xml, "fxDistShape");
+    songEffects_.dist_808 = fxByte (*xml, "fxDist808");
+    songEffects_.dist_909 = fxByte (*xml, "fxDist909");
+    songEffects_.pcf_enabled = fxByte (*xml, "fxPcfEnabled");
+    songEffects_.pcf_frequency = fxByte (*xml, "fxPcfFrequency");
+    songEffects_.pcf_resonance = fxByte (*xml, "fxPcfResonance");
+    songEffects_.pcf_amount = fxByte (*xml, "fxPcfAmount");
+    songEffects_.pcf_wave = fxByte (*xml, "fxPcfWave");
+    songEffects_.pcf_decay = fxByte (*xml, "fxPcfDecay");
+    songEffects_.pcf_mode = fxByte (*xml, "fxPcfMode");
+    songEffects_.pcf_id = fxByte (*xml, "fxPcfId");
+    songEffects_.delay_enabled = fxByte (*xml, "fxDelayEnabled");
+    songEffects_.delay_steps = fxByte (*xml, "fxDelaySteps");
+    songEffects_.delay_mode = fxByte (*xml, "fxDelayMode");
+    songEffects_.delay_feedback = fxByte (*xml, "fxDelayFeedback");
+    songEffects_.delay_pan = fxByte (*xml, "fxDelayPan");
+    songEffects_.delay_send_808 = fxByte (*xml, "fxDelaySend808");
+    songEffects_.delay_send_909 = fxByte (*xml, "fxDelaySend909");
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()

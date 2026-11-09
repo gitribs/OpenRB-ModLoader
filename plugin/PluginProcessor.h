@@ -73,6 +73,10 @@ public:
     juce::String songDisplayName() const;
     /// Mod named in the last loaded song (GLOB), empty if none.
     juce::String loadedSongModName() const { return songModName; }
+    /// Distortion / PCF / Delay snapshot from the last loaded song (zeros if none).
+    const OrbModloaderSong& songEffects() const { return songEffects_; }
+    /// True when that machine had Distortion, PCF, or Delay routing in the loaded song.
+    bool machineHasEffects (int machine) const;
     /// Load the scanned kit whose name matches `name` (case-insensitive). Returns the index, or -1.
     int loadModByName (const juce::String& name);
 
@@ -112,6 +116,7 @@ private:
     std::atomic<float>* muteMain909 = nullptr;
     juce::File songFile;
     juce::String songModName;
+    OrbModloaderSong songEffects_ {};
     double hostRate = 44100.0;
     bool exact44100 = true;
     int maxHostBlock = 0;

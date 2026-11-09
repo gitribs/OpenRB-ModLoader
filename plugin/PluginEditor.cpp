@@ -107,6 +107,52 @@ bool is808Level (int ctrl)
     }
 }
 
+bool songDistOn (const OrbModloaderSong& s, int machine)
+{
+    return s.dist_enabled != 0 && (machine == 0 ? s.dist_808 : s.dist_909) != 0;
+}
+
+bool songPcfOn (const OrbModloaderSong& s, int machine)
+{
+    return s.pcf_enabled != 0 && s.pcf_id == (machine == 0 ? 3 : 4);
+}
+
+bool songDelayOn (const OrbModloaderSong& s, int machine)
+{
+    return s.delay_enabled != 0 && (machine == 0 ? s.delay_send_808 : s.delay_send_909) != 0;
+}
+
+uint8_t delaySendOf (const OrbModloaderSong& s, int machine)
+{
+    return machine == 0 ? s.delay_send_808 : s.delay_send_909;
+}
+
+juce::String distortRecallText (const OrbModloaderSong& s)
+{
+    return "openrb-distort 1\namount: " + juce::String ((int) s.dist_amount)
+         + "\nshape: " + juce::String ((int) s.dist_shape) + "\n";
+}
+
+juce::String pcfRecallText (const OrbModloaderSong& s)
+{
+    const int pattern = juce::jlimit (0, 54, (int) s.pcf_wave);
+    return "openrb-pcf 1\nfrequency: " + juce::String ((int) s.pcf_frequency)
+         + "\nresonance: " + juce::String ((int) s.pcf_resonance)
+         + "\namount: " + juce::String ((int) s.pcf_amount)
+         + "\ndecay: " + juce::String ((int) s.pcf_decay)
+         + "\npattern: " + juce::String (pattern)
+         + "\nmode: " + juce::String (s.pcf_mode == 1 ? "lp" : "bp") + "\n";
+}
+
+juce::String delayRecallText (const OrbModloaderSong& s, int machine)
+{
+    return "openrb-delay 1\nmix: " + juce::String ((int) delaySendOf (s, machine))
+         + "\nsteps: " + juce::String ((int) s.delay_steps)
+         + "\nmode: " + juce::String (s.delay_mode == 0 ? "triplet" : "sixteenth")
+         + "\nfeedback: " + juce::String ((int) s.delay_feedback)
+         + "\npan: " + juce::String ((int) s.delay_pan) + "\n";
+}
+
 int mixBusFor808 (int col)
 {
     // AC has no aux. Panel order is CY, OH, CH; voice/bus order is OH, CH, CY.
@@ -394,6 +440,32 @@ void HeaderIconButton::mouseDown (const juce::MouseEvent& e)
 {
     if (! e.mods.isPopupMenu())
         juce::Button::mouseDown (e);
+}
+
+FxBadgeButton::FxBadgeButton() : juce::Button ({}) {}
+
+void FxBadgeButton::paintButton (juce::Graphics& g, bool highlighted, bool down)
+{
+    auto r = getLocalBounds().toFloat().reduced (0.5f);
+    g.setColour (kWell);
+    g.fillRoundedRectangle (r, 2.0f);
+    const auto ink = highlighted || down ? kRed.brighter (0.25f) : kRed;
+    g.setColour (ink);
+    g.drawRoundedRectangle (r, 2.0f, 1.0f);
+    g.setFont (juce::Font { juce::FontOptions().withHeight (16.0f).withStyle ("Bold") });
+    g.drawText ("!", getLocalBounds(), juce::Justification::centred, false);
+}
+
+void FxBadgeButton::mouseDown (const juce::MouseEvent& e)
+{
+    if (! e.mods.isPopupMenu())
+        juce::Button::mouseDown (e);
+}
+
+void FxBadgeButton::mouseUp (const juce::MouseEvent& e)
+{
+    if (! e.mods.isPopupMenu())
+        juce::Button::mouseUp (e);
 }
 
 void HeaderIconButton::mouseUp (const juce::MouseEvent& e)
@@ -691,7 +763,9 @@ public:
 
     bool canModalEventBeSentToComponent (const juce::Component* target) override
     {
-        return target == &owner.settingsBtn;
+        return target == &owner.settingsBtn
+            || target == &owner.fx808
+            || target == &owner.fx909;
     }
 
 private:
@@ -732,6 +806,204 @@ private:
     juce::Label modsCaption, modsPath, datCaption, datPath;
     ModTextButton closeBtn, modsBtn, datBtn;
     bool locateDat = false;
+};
+
+class ModloaderEditor::EffectsRecallPanel final : public juce::Component
+{
+public:
+    EffectsRecallPanel (ModloaderEditor& o, int machineId) : owner (o), machine (machineId)
+    {
+        setWantsKeyboardFocus (true);
+        setOpaque (false);
+
+        auto setupLabel = [this] (juce::Label& l, juce::Colour c, float h, bool bold)
+        {
+            l.setColour (juce::Label::textColourId, c);
+            l.setFont (bold ? juce::Font { juce::FontOptions().withHeight (h).withStyle ("Bold") }
+                            : juce::Font { juce::FontOptions (h) });
+            l.setJustificationType (juce::Justification::topLeft);
+            l.setMinimumHorizontalScale (1.0f);
+            addAndMakeVisible (l);
+        };
+
+        setupLabel (title, kAmber, 16.0f, true);
+        setupLabel (routing, kText, 13.0f, false);
+        routing.setJustificationType (juce::Justification::topLeft);
+
+        auto setupRow = [this, &setupLabel] (Row& row, const juce::String& name)
+        {
+            setupLabel (row.title, kAmber, 13.0f, true);
+            row.title.setText (name, juce::dontSendNotification);
+            setupLabel (row.summary, kText, 12.0f, false);
+            row.copy.setButtonText ("Copy");
+            row.copy.setColour (juce::TextButton::buttonColourId, kWell);
+            row.copy.getProperties().set ("headerBtn", true);
+            addAndMakeVisible (row.copy);
+        };
+        setupRow (dist, "Distortion");
+        setupRow (pcf, "PCF");
+        setupRow (delay, "Delay");
+        dist.copy.onClick = [this] { copyText (distortRecallText (owner.proc.songEffects())); };
+        pcf.copy.onClick = [this] { copyText (pcfRecallText (owner.proc.songEffects())); };
+        delay.copy.onClick = [this]
+        {
+            copyText (delayRecallText (owner.proc.songEffects(), machine));
+        };
+
+        closeBtn.setButtonText (juce::String::fromUTF8 ("\xc3\x97"));
+        closeBtn.setColour (juce::TextButton::buttonColourId, kWell);
+        closeBtn.getProperties().set ("headerBtn", true);
+        addAndMakeVisible (closeBtn);
+        closeBtn.onClick = [this] { owner.hideEffectsRecall(); };
+        refresh();
+    }
+
+    int currentMachine() const { return machine; }
+
+    void setMachine (int machineId)
+    {
+        if (machine == machineId)
+            return;
+        machine = machineId;
+        refresh();
+    }
+
+    void refresh()
+    {
+        const auto& s = owner.proc.songEffects();
+        const bool is808 = machine == 0;
+        title.setText (is808 ? "808 effects" : "909 effects", juce::dontSendNotification);
+        routing.setText ("Insert OpenRB effects on the "
+                             + juce::String (is808 ? "808" : "909")
+                             + " Mix bus, Distortion then PCF, then Delay. Copy each used effect "
+                               "and paste it into the matching OpenRB plugin.",
+                         juce::dontSendNotification);
+
+        dist.visible = songDistOn (s, machine);
+        dist.summary.setText ("amount " + juce::String ((int) s.dist_amount)
+                                  + "    shape " + juce::String ((int) s.dist_shape),
+                              juce::dontSendNotification);
+
+        pcf.visible = songPcfOn (s, machine);
+        pcf.summary.setText ("freq " + juce::String ((int) s.pcf_frequency)
+                                 + "    res " + juce::String ((int) s.pcf_resonance)
+                                 + "    amt " + juce::String ((int) s.pcf_amount)
+                                 + "    decay " + juce::String ((int) s.pcf_decay)
+                                 + "    pattern " + juce::String (juce::jlimit (0, 54, (int) s.pcf_wave))
+                                 + "    mode " + juce::String (s.pcf_mode == 1 ? "LP" : "BP"),
+                             juce::dontSendNotification);
+
+        delay.visible = songDelayOn (s, machine);
+        delay.summary.setText ("mix " + juce::String ((int) delaySendOf (s, machine))
+                                   + "    steps " + juce::String ((int) s.delay_steps)
+                                   + "    mode " + juce::String (s.delay_mode == 0 ? "triplet" : "sixteenth")
+                                   + "    feedback " + juce::String ((int) s.delay_feedback)
+                                   + "    pan " + juce::String ((int) s.delay_pan),
+                               juce::dontSendNotification);
+
+        auto showRow = [] (Row& row)
+        {
+            row.title.setVisible (row.visible);
+            row.summary.setVisible (row.visible);
+            row.copy.setVisible (row.visible);
+        };
+        showRow (dist);
+        showRow (pcf);
+        showRow (delay);
+        resized();
+        repaint();
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        g.setColour (juce::Colours::black.withAlpha (0.55f));
+        g.fillRect (getLocalBounds());
+        auto card = cardBounds().toFloat();
+        g.setColour (kPanel);
+        g.fillRoundedRectangle (card, 8.0f);
+        g.setColour (kLine);
+        g.drawRoundedRectangle (card, 8.0f, 1.0f);
+    }
+
+    void resized() override
+    {
+        auto r = cardBounds().reduced (20, 16);
+        auto titleRow = r.removeFromTop (24);
+        closeBtn.setBounds (titleRow.removeFromRight (24).reduced (1));
+        title.setBounds (titleRow);
+        r.removeFromTop (12);
+        routing.setBounds (r.removeFromTop (64));
+        r.removeFromTop (12);
+        layoutRow (r, dist);
+        layoutRow (r, pcf);
+        layoutRow (r, delay);
+    }
+
+    void mouseDown (const juce::MouseEvent& e) override
+    {
+        if (! cardBounds().contains (e.getPosition()))
+            owner.hideEffectsRecall();
+    }
+
+    bool keyPressed (const juce::KeyPress& key) override
+    {
+        if (key == juce::KeyPress::escapeKey)
+        {
+            owner.hideEffectsRecall();
+            return true;
+        }
+        return false;
+    }
+
+    void inputAttemptWhenModal() override
+    {
+        owner.hideEffectsRecall();
+    }
+
+    bool canModalEventBeSentToComponent (const juce::Component* target) override
+    {
+        return target == &owner.fx808 || target == &owner.fx909 || target == &owner.settingsBtn;
+    }
+
+private:
+    struct Row
+    {
+        juce::Label title, summary;
+        ModTextButton copy;
+        bool visible = false;
+    };
+
+    juce::Rectangle<int> cardBounds() const
+    {
+        const int n = (int) dist.visible + (int) pcf.visible + (int) delay.visible;
+        const int h = 148 + juce::jmax (1, n) * 58;
+        return getLocalBounds().withSizeKeepingCentre (kCardW, h);
+    }
+
+    static void layoutRow (juce::Rectangle<int>& r, Row& row)
+    {
+        if (! row.visible)
+            return;
+        auto head = r.removeFromTop (22);
+        row.copy.setBounds (head.removeFromRight (72).reduced (0, 1));
+        head.removeFromRight (8);
+        row.title.setBounds (head);
+        r.removeFromTop (4);
+        row.summary.setBounds (r.removeFromTop (28));
+        r.removeFromTop (8);
+    }
+
+    static void copyText (const juce::String& text)
+    {
+        juce::SystemClipboard::copyTextToClipboard (text);
+    }
+
+    static constexpr int kCardW = 520;
+    ModloaderEditor& owner;
+    int machine = 0;
+    juce::Label title, routing;
+    Row dist, pcf, delay;
+    ModTextButton closeBtn;
 };
 
 class ModloaderEditor::SplashViewer final : public juce::Component
@@ -1166,6 +1438,12 @@ ModloaderEditor::ModloaderEditor (ModloaderProcessor& p)
     setup909();
     setupDisable (disable808, 0);
     setupDisable (disable909, 1);
+    addAndMakeVisible (fx808);
+    addAndMakeVisible (fx909);
+    fx808.setTooltip ("This song used effects on the 808");
+    fx909.setTooltip ("This song used effects on the 909");
+    fx808.onClick = [this] { toggleEffectsRecall (0); };
+    fx909.onClick = [this] { toggleEffectsRecall (1); };
     select808 (1);
     select909 (1);
     addMouseListener (&focusListener, true);
@@ -1176,6 +1454,7 @@ ModloaderEditor::ModloaderEditor (ModloaderProcessor& p)
     refreshSongLabel();
     refreshSplash();
     refreshSteps();
+    refreshFxBadges();
     resized();
     startTimerHz (30);
 
@@ -1193,6 +1472,7 @@ ModloaderEditor::~ModloaderEditor()
     hideModPicker();
     hideSettings();
     hideSplash();
+    hideEffectsRecall();
     stopTimer();
     removeMouseListener (&focusListener);
     setLookAndFeel (nullptr);
@@ -1747,6 +2027,7 @@ void ModloaderEditor::finishSongLoad()
     refreshSplash();
     refreshDisable();
     sync808Radios();
+    refreshFxBadges();
     if (statusNeedsDat())
         showSettings (true);
 }
@@ -1909,6 +2190,7 @@ void ModloaderEditor::showSettings (bool locateDat)
 {
     hideModPicker();
     hideSplash();
+    hideEffectsRecall();
     if (settingsPanel != nullptr)
     {
         settingsPanel->setLocateDat (locateDat);
@@ -1950,6 +2232,7 @@ void ModloaderEditor::showSplash()
 {
     hideModPicker();
     hideSettings();
+    hideEffectsRecall();
     if (splashViewer != nullptr || ! splashImage.isValid())
         return;
     splashViewer = std::make_unique<SplashViewer> (*this, splashImage);
@@ -1967,6 +2250,66 @@ void ModloaderEditor::hideSplash()
     auto viewer = std::move (splashViewer);
     if (viewer->isCurrentlyModal())
         viewer->exitModalState (0);
+}
+
+void ModloaderEditor::refreshFxBadges()
+{
+    fx808.setVisible (proc.machineHasEffects (0));
+    fx909.setVisible (proc.machineHasEffects (1));
+    if (effectsPanel != nullptr && ! proc.machineHasEffects (effectsPanel->currentMachine()))
+        hideEffectsRecall();
+}
+
+void ModloaderEditor::toggleEffectsRecall (int machine)
+{
+    if (effectsPanel != nullptr && effectsPanel->currentMachine() == machine)
+        hideEffectsRecall();
+    else
+        showEffectsRecall (machine);
+}
+
+void ModloaderEditor::showEffectsRecall (int machine)
+{
+    hideModPicker();
+    hideSettings();
+    hideSplash();
+    if (effectsPanel != nullptr)
+    {
+        effectsPanel->setMachine (machine);
+        return;
+    }
+    juce::Component::SafePointer<ModloaderEditor> safe (this);
+    juce::MessageManager::callAsync ([safe, machine]
+    {
+        if (safe != nullptr)
+            safe->presentEffectsRecall (machine);
+    });
+}
+
+void ModloaderEditor::presentEffectsRecall (int machine)
+{
+    if (effectsPanel != nullptr)
+    {
+        effectsPanel->setMachine (machine);
+        return;
+    }
+    if (! proc.machineHasEffects (machine))
+        return;
+    effectsPanel = std::make_unique<EffectsRecallPanel> (*this, machine);
+    addAndMakeVisible (*effectsPanel);
+    effectsPanel->setBounds (getLocalBounds());
+    effectsPanel->toFront (true);
+    effectsPanel->enterModalState (true, nullptr, false);
+    effectsPanel->grabKeyboardFocus();
+}
+
+void ModloaderEditor::hideEffectsRecall()
+{
+    if (effectsPanel == nullptr)
+        return;
+    auto panel = std::move (effectsPanel);
+    if (panel->isCurrentlyModal())
+        panel->exitModalState (0);
 }
 
 bool ModloaderEditor::statusNeedsDat() const
@@ -2041,6 +2384,8 @@ void ModloaderEditor::resetDevice()
     refreshSongLabel();
     refreshDisable();
     sync808Radios();
+    refreshFxBadges();
+    hideEffectsRecall();
     repaint();
 }
 
@@ -2203,6 +2548,7 @@ void ModloaderEditor::timerCallback()
     refreshDisable();
     sync808Radios();
     refreshModLabel();
+    refreshFxBadges();
     if (auto* e = eng())
         if (orb_modloader_current_mod (e) != splashMod)
             refreshSplash();
@@ -2610,8 +2956,22 @@ void ModloaderEditor::resized()
     placeMixFader (vol808, slot808);
     placeMixFader (vol909, slot909);
 
+    auto placeFxBadge = [&] (FxBadgeButton& btn, const juce::Rectangle<int>& machine)
+    {
+        const int availX = kSlot0X + k909SlotAreaW + 6;
+        const int availW = machineRight - availX;
+        constexpr int size = 22;
+        const int x = availX + (availW - size) / 2;
+        const int y = machine.getBottom() - 24 - size;
+        btn.setBounds (x, y, size, size);
+    };
+    placeFxBadge (fx808, kMachine808);
+    placeFxBadge (fx909, kMachine909);
+
     if (settingsPanel != nullptr)
         settingsPanel->setBounds (getLocalBounds());
     if (splashViewer != nullptr)
         splashViewer->setBounds (getLocalBounds());
+    if (effectsPanel != nullptr)
+        effectsPanel->setBounds (getLocalBounds());
 }
