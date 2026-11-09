@@ -724,6 +724,67 @@ private:
     bool locateDat = false;
 };
 
+class ModloaderEditor::SplashViewer final : public juce::Component
+{
+public:
+    explicit SplashViewer (ModloaderEditor& o, juce::Image img) : owner (o), image (std::move (img))
+    {
+        setWantsKeyboardFocus (true);
+        setOpaque (false);
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        g.setColour (juce::Colours::black.withAlpha (0.55f));
+        g.fillRect (getLocalBounds());
+        auto r = imageBounds();
+        if (! image.isValid() || r.isEmpty())
+            return;
+        g.setImageResamplingQuality (juce::Graphics::highResamplingQuality);
+        g.drawImage (image, r.toFloat());
+        g.setColour (kLine);
+        g.drawRect (r, 1);
+    }
+
+    void mouseDown (const juce::MouseEvent&) override
+    {
+        owner.hideSplash();
+    }
+
+    bool keyPressed (const juce::KeyPress& key) override
+    {
+        if (key == juce::KeyPress::escapeKey)
+        {
+            owner.hideSplash();
+            return true;
+        }
+        return false;
+    }
+
+    void inputAttemptWhenModal() override
+    {
+        owner.hideSplash();
+    }
+
+private:
+    juce::Rectangle<int> imageBounds() const
+    {
+        if (! image.isValid())
+            return {};
+        const int pad = 24;
+        auto max = getLocalBounds().reduced (pad);
+        const float scale = juce::jmin (1.0f,
+                                        (float) max.getWidth() / (float) juce::jmax (1, image.getWidth()),
+                                        (float) max.getHeight() / (float) juce::jmax (1, image.getHeight()));
+        const int w = juce::jmax (1, juce::roundToInt ((float) image.getWidth() * scale));
+        const int h = juce::jmax (1, juce::roundToInt ((float) image.getHeight() * scale));
+        return getLocalBounds().withSizeKeepingCentre (w, h);
+    }
+
+    ModloaderEditor& owner;
+    juce::Image image;
+};
+
 void StepLed::setOn (bool shouldBeOn)
 {
     if (on == shouldBeOn)
@@ -1111,6 +1172,7 @@ ModloaderEditor::~ModloaderEditor()
     juce::PopupMenu::dismissAllActiveMenus();
     hideModPicker();
     hideSettings();
+    hideSplash();
     stopTimer();
     removeMouseListener (&focusListener);
     setLookAndFeel (nullptr);
@@ -1799,6 +1861,7 @@ void ModloaderEditor::toggleSettings()
 void ModloaderEditor::showSettings (bool locateDat)
 {
     hideModPicker();
+    hideSplash();
     if (settingsPanel != nullptr)
     {
         settingsPanel->setLocateDat (locateDat);
@@ -1834,6 +1897,29 @@ void ModloaderEditor::hideSettings()
     auto panel = std::move (settingsPanel);
     if (panel->isCurrentlyModal())
         panel->exitModalState (0);
+}
+
+void ModloaderEditor::showSplash()
+{
+    hideModPicker();
+    hideSettings();
+    if (splashViewer != nullptr || ! splashImage.isValid())
+        return;
+    splashViewer = std::make_unique<SplashViewer> (*this, splashImage);
+    addAndMakeVisible (*splashViewer);
+    splashViewer->setBounds (getLocalBounds());
+    splashViewer->toFront (true);
+    splashViewer->enterModalState (true, nullptr, false);
+    splashViewer->grabKeyboardFocus();
+}
+
+void ModloaderEditor::hideSplash()
+{
+    if (splashViewer == nullptr)
+        return;
+    auto viewer = std::move (splashViewer);
+    if (viewer->isCurrentlyModal())
+        viewer->exitModalState (0);
 }
 
 bool ModloaderEditor::statusNeedsDat() const
@@ -2088,8 +2174,31 @@ void ModloaderEditor::updateMachineFocus (juce::Point<int> pos)
     repaint();
 }
 
+void ModloaderEditor::updateSplashCursor (juce::Point<int> pos)
+{
+    const bool over = splashImage.isValid() && splash808.contains (pos);
+    setMouseCursor (over ? juce::MouseCursor::PointingHandCursor
+                         : juce::MouseCursor::NormalCursor);
+}
+
+void ModloaderEditor::mouseMove (const juce::MouseEvent& e)
+{
+    updateSplashCursor (e.getPosition());
+}
+
+void ModloaderEditor::mouseExit (const juce::MouseEvent&)
+{
+    setMouseCursor (juce::MouseCursor::NormalCursor);
+}
+
 void ModloaderEditor::mouseDown (const juce::MouseEvent& e)
 {
+    const auto pos = e.getEventRelativeTo (this).getPosition();
+    if (! e.mods.isPopupMenu() && splashImage.isValid() && splash808.contains (pos))
+    {
+        showSplash();
+        return;
+    }
     for (int i = 0; i < 12; ++i)
     {
         if (e.eventComponent == &legend808[(size_t) i])
@@ -2103,7 +2212,6 @@ void ModloaderEditor::mouseDown (const juce::MouseEvent& e)
             return;
         }
     }
-    const auto pos = e.getEventRelativeTo (this).getPosition();
     for (int i = 0; i < 12; ++i)
     {
         if (slot808[(size_t) i].contains (pos))
@@ -2437,4 +2545,6 @@ void ModloaderEditor::resized()
 
     if (settingsPanel != nullptr)
         settingsPanel->setBounds (getLocalBounds());
+    if (splashViewer != nullptr)
+        splashViewer->setBounds (getLocalBounds());
 }

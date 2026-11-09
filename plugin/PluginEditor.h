@@ -114,6 +114,8 @@ public:
     void paint (juce::Graphics&) override;
     void resized() override;
     void mouseDown (const juce::MouseEvent&) override;
+    void mouseMove (const juce::MouseEvent&) override;
+    void mouseExit (const juce::MouseEvent&) override;
 
 private:
     void timerCallback() override;
@@ -132,6 +134,9 @@ private:
     void refreshShuffle();
     void refreshSplash();
     void refreshDisable();
+    void updateSplashCursor (juce::Point<int> pos);
+    void showSplash();
+    void hideSplash();
     void setupDisable (juce::ToggleButton& btn, int machine);
     void click808Step (int step);
     void click909Step (int step);
@@ -254,8 +259,10 @@ private:
 
     class ModPicker;
     class SettingsPanel;
+    class SplashViewer;
     std::unique_ptr<ModPicker> modPicker;
     std::unique_ptr<SettingsPanel> settingsPanel;
+    std::unique_ptr<SplashViewer> splashViewer;
     std::unique_ptr<juce::FileChooser> chooser;
     bool fileChooserOpen = false;
 
