@@ -97,6 +97,7 @@ void orb_modloader_set_pat_shuffle(OrbModloader *m, int32_t machine, uint8_t pat
 uint8_t orb_modloader_get_pat_length(OrbModloader *m, int32_t machine, uint8_t pattern);
 void orb_modloader_set_pat_length(OrbModloader *m, int32_t machine, uint8_t pattern, uint8_t length);
 int32_t orb_modloader_last_step(OrbModloader *m, int32_t machine);
+void orb_modloader_trigger(OrbModloader *m, int32_t machine, uint8_t col, uint8_t velocity);
 
 void orb_modloader_scan(OrbModloader *m, const char *folder);
 int32_t orb_modloader_mod_count(OrbModloader *m);

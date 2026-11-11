@@ -255,6 +255,23 @@ impl Tr909 {
         }
     }
 
+    /// Fire instrument `col` (1..=11) from MIDI. Does not consult [`Tr909::enabled`].
+    ///
+    /// Velocity bands: 80 normal, 104 normal+AC, 112 double, 127 double+AC. AC uses the
+    /// same `2 * accent_knob * 0.03125 + 1` multiplier as a pattern step whose AC cell is 2.
+    pub fn midi_hit(&mut self, col: usize, velocity: u8) {
+        if !(1..=11).contains(&col) || velocity == 0 {
+            return;
+        }
+        let hard = velocity >= 108;
+        let ac_on = (92..108).contains(&velocity) || velocity >= 120;
+        let ac = if ac_on { 2u8 } else { 0 };
+        self.accent = st((ac as f64 * self.live[ACCENT] as f64) * ACC_STEP as f64 + ACC_BASE);
+        let k = if hard { GAIN_ACCENT } else { GAIN_ON };
+        self.gain = st(self.accent as f64 * k);
+        self.trigger(col);
+    }
+
     fn pattern(&self, p: u8) -> &[u8] {
         let at = p as usize * PATTERN_LEN;
         &self.patterns[at..at + PATTERN_LEN]

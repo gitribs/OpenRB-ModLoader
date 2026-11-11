@@ -3,6 +3,7 @@
 #include "PluginProcessor.h"
 
 #include <array>
+#include <functional>
 #include <memory>
 
 class ModloaderLookAndFeel final : public juce::LookAndFeel_V4
@@ -104,6 +105,20 @@ private:
     bool attention = false;
 };
 
+class MidiDragHandle final : public juce::Component,
+                             public juce::SettableTooltipClient
+{
+public:
+    std::function<void()> onStartDrag;
+    void paint (juce::Graphics&) override;
+    void mouseDown (const juce::MouseEvent&) override;
+    void mouseDrag (const juce::MouseEvent&) override;
+    void enablementChanged() override { repaint(); }
+
+private:
+    bool dragging = false;
+};
+
 class FxBadgeButton final : public juce::Button
 {
 public:
@@ -114,6 +129,7 @@ public:
 };
 
 class ModloaderEditor final : public juce::AudioProcessorEditor,
+                              public juce::DragAndDropContainer,
                               private juce::Timer
 {
 public:
@@ -142,9 +158,13 @@ private:
     void refreshPatternHeader();
     void refreshShuffle();
     void refreshMixMute();
+    void refreshRun();
+    void refreshMidiDrag();
+    void startPatternMidiDrag();
     void refreshSplash();
     void refreshDisable();
     void setMixMute (bool on);
+    void setRun (bool on);
     void updateSplashCursor (juce::Point<int> pos);
     void showSplash();
     void hideSplash();
@@ -199,7 +219,7 @@ private:
     ModloaderProcessor& proc;
     ModloaderLookAndFeel lnf;
 
-    juce::Label title, modName, songName, status, shuffleN, mixMuteN, flamN;
+    juce::Label title, modName, songName, status, shuffleN, mixMuteN, runN, flamN;
     IncDecArrowButton modUp { true }, modDown { false };
     HeaderIconButton songOpenBtn { HeaderIconButton::Kind::Open };
     HeaderIconButton songSaveBtn { HeaderIconButton::Kind::Save };
@@ -208,6 +228,8 @@ private:
     juce::AudioProcessorValueTreeState::SliderAttachment shuffleA;
     ModToggleButton shuffleOn;
     ModToggleButton mixMuteOn;
+    ModToggleButton runOn;
+    MidiDragHandle midiDrag;
     ModSlider vol808, vol909;
     juce::AudioProcessorValueTreeState::SliderAttachment vol808A, vol909A;
 

@@ -352,6 +352,9 @@ pub struct Modloader {
     status: String,
     /// `splash.jpg` of the kit that is sounding, or empty if the mod has none.
     splash: Vec<u8>,
+    /// MIDI hits queued on the audio thread until the next 64-sample engine block.
+    pending_midi: [(i32, u8, u8); 32],
+    pending_midi_n: usize,
 }
 
 impl Default for Modloader {
@@ -399,6 +402,8 @@ impl Modloader {
             current: 0,
             status: String::new(),
             splash: builtin_splash(),
+            pending_midi: [(0, 0, 0); 32],
+            pending_midi_n: 0,
         };
         m.scan_dir();
         m
@@ -416,6 +421,7 @@ impl Modloader {
         self.delay_mix909 = [0.0; BLOCK];
         self.delay_aux = [[0.0; BLOCK]; AUX];
         self.fill = 0;
+        self.pending_midi_n = 0;
         self.restart_clock();
         self.blocks_processed = 0;
     }
@@ -477,6 +483,7 @@ impl Modloader {
                 let shuffled = seq::shuffled(tick, params.shuffle);
                 self.tr808.step(tick, shuffled, tempo as i32);
                 self.tr909.step(tick, shuffled, tempo as i32);
+                self.drain_midi();
 
                 let mut v808 = [[0.0f32; BLOCK]; tr808::VOICES];
                 let mut v909 = [[0.0f32; BLOCK]; tr909::VOICES];
@@ -700,6 +707,32 @@ impl Modloader {
         }
         if let Some(p) = self.machine_patterns_mut(machine) {
             p[pattern as usize * tr808::PATTERN_LEN + 1] = length.clamp(1, 16);
+        }
+    }
+
+    /// Queue a MIDI hit. Fired on the next engine block after `apply_params`, so Enable does
+    /// not gate it. `col` is a pattern column 1..=11.
+    pub fn midi_trigger(&mut self, machine: i32, col: u8, velocity: u8) {
+        if velocity == 0 || !(1..=11).contains(&col) || (machine != 0 && machine != 1) {
+            return;
+        }
+        if self.pending_midi_n >= self.pending_midi.len() {
+            return;
+        }
+        self.pending_midi[self.pending_midi_n] = (machine, col, velocity);
+        self.pending_midi_n += 1;
+    }
+
+    fn drain_midi(&mut self) {
+        let n = self.pending_midi_n;
+        self.pending_midi_n = 0;
+        for i in 0..n {
+            let (machine, col, vel) = self.pending_midi[i];
+            match machine {
+                0 => self.tr808.midi_hit(col as usize, vel),
+                1 => self.tr909.midi_hit(col as usize, vel),
+                _ => {}
+            }
         }
     }
 
@@ -1053,6 +1086,18 @@ pub unsafe extern "C" fn orb_modloader_set_pat_length(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn orb_modloader_last_step(m: *mut Modloader, machine: i32) -> i32 {
     with_ref(m, |p| p.last_step(machine), 0)
+}
+
+/// # Safety
+/// `m` from [`orb_modloader_new`], or null. `col` is a pattern column 1..=11.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn orb_modloader_trigger(
+    m: *mut Modloader,
+    machine: i32,
+    col: u8,
+    velocity: u8,
+) {
+    with_mut(m, |p| p.midi_trigger(machine, col, velocity), ());
 }
 
 /// # Safety

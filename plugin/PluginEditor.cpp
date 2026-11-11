@@ -1,4 +1,5 @@
 #include "PluginEditor.h"
+#include "PatternMidi.h"
 
 #include <algorithm>
 #include <cmath>
@@ -452,8 +453,8 @@ void FxBadgeButton::paintButton (juce::Graphics& g, bool highlighted, bool down)
     const auto ink = highlighted || down ? kRed.brighter (0.25f) : kRed;
     g.setColour (ink);
     g.drawRoundedRectangle (r, 2.0f, 1.0f);
-    g.setFont (juce::Font { juce::FontOptions().withHeight (16.0f).withStyle ("Bold") });
-    g.drawText ("!", getLocalBounds(), juce::Justification::centred, false);
+    g.setFont (juce::Font { juce::FontOptions().withHeight (11.0f).withStyle ("Bold") });
+    g.drawText ("FX", getLocalBounds(), juce::Justification::centred, false);
 }
 
 void FxBadgeButton::mouseDown (const juce::MouseEvent& e)
@@ -472,6 +473,56 @@ void HeaderIconButton::mouseUp (const juce::MouseEvent& e)
 {
     if (! e.mods.isPopupMenu())
         juce::Button::mouseUp (e);
+}
+
+void MidiDragHandle::paint (juce::Graphics& g)
+{
+    auto r = getLocalBounds().toFloat().reduced (0.5f);
+    g.setColour (kWell);
+    g.fillRoundedRectangle (r, 2.0f);
+    const bool lit = isEnabled() && (isMouseOverOrDragging (true) || dragging);
+    g.setColour (! isEnabled() ? kLine.withAlpha (0.4f) : (lit ? kAmber : kLine));
+    g.drawRoundedRectangle (r, 2.0f, 1.0f);
+
+    const auto c = r.getCentre();
+    const float outer = juce::jmin (r.getWidth(), r.getHeight()) * 0.32f;
+    const float inner = outer * 0.62f;
+    g.setColour (! isEnabled() ? kMuted.withAlpha (0.45f) : (lit ? kAmber : kText));
+    g.drawEllipse (c.x - outer, c.y - outer, outer * 2.0f, outer * 2.0f, 1.2f);
+    g.drawEllipse (c.x - inner, c.y - inner, inner * 2.0f, inner * 2.0f, 1.0f);
+
+    const float pin = juce::jmax (1.4f, outer * 0.16f);
+    const float ring = inner * 0.72f;
+    constexpr float kHalfPi = juce::MathConstants<float>::halfPi;
+    constexpr float kSpread = 0.85f;
+    const float angles[] = {
+        kHalfPi - kSpread, kHalfPi, kHalfPi + kSpread,
+        kHalfPi * 3.0f - kSpread, kHalfPi * 3.0f + kSpread
+    };
+    for (float a : angles)
+    {
+        const float x = c.x + std::cos (a) * ring;
+        const float y = c.y + std::sin (a) * ring;
+        g.fillEllipse (x - pin * 0.5f, y - pin * 0.5f, pin, pin);
+    }
+}
+
+void MidiDragHandle::mouseDown (const juce::MouseEvent& e)
+{
+    juce::ignoreUnused (e);
+}
+
+void MidiDragHandle::mouseDrag (const juce::MouseEvent& e)
+{
+    if (e.mods.isPopupMenu() || ! isEnabled() || dragging || onStartDrag == nullptr)
+        return;
+    if (e.getDistanceFromDragStart() < 4)
+        return;
+    dragging = true;
+    repaint();
+    onStartDrag();
+    dragging = false;
+    repaint();
 }
 
 class ModloaderEditor::ModPicker final : public juce::Component,
@@ -1382,6 +1433,10 @@ ModloaderEditor::ModloaderEditor (ModloaderProcessor& p)
     mixMuteN.setJustificationType (juce::Justification::centredRight);
     mixMuteN.setBorderSize ({});
     mixMuteN.setTooltip ("Omit the focused machine from the main mix");
+    addLabel (runN, "RUN", kMuted, 11.0f);
+    runN.setJustificationType (juce::Justification::centredRight);
+    runN.setBorderSize ({});
+    runN.setTooltip ("Run the focused machine's sequencer. Turn off when MIDI on a track is playing the drums");
     addLabel (flamN, "FLAM", kMuted, 11.0f);
     flamN.setJustificationType (juce::Justification::centredLeft);
     modName.setJustificationType (juce::Justification::centredLeft);
@@ -1431,6 +1486,16 @@ ModloaderEditor::ModloaderEditor (ModloaderProcessor& p)
     mixMuteOn.setTooltip ("Omit the focused machine from the main mix");
     addAndMakeVisible (mixMuteOn);
     mixMuteOn.onClick = [this] { setMixMute (mixMuteOn.getToggleState()); };
+    runOn.setClickingTogglesState (true);
+    runOn.setButtonText ({});
+    runOn.setColour (juce::ToggleButton::textColourId, kMuted);
+    runOn.setTooltip ("Run the focused machine's sequencer. Turn off when MIDI on a track is playing the drums");
+    addAndMakeVisible (runOn);
+    runOn.onClick = [this] { setRun (runOn.getToggleState()); };
+    midiDrag.onStartDrag = [this] { startPatternMidiDrag(); };
+    midiDrag.setMouseCursor (juce::MouseCursor::DraggingHandCursor);
+    midiDrag.setRepaintsOnMouseActivity (true);
+    addAndMakeVisible (midiDrag);
 
     setupPatternSection (0);
     setupPatternSection (1);
@@ -1450,6 +1515,7 @@ ModloaderEditor::ModloaderEditor (ModloaderProcessor& p)
     pat808.shownBank = currentPattern (0) / 8;
     pat909.shownBank = currentPattern (1) / 8;
     refreshPatternHeader();
+    refreshMidiDrag();
     refreshModLabel();
     refreshSongLabel();
     refreshSplash();
@@ -1760,6 +1826,7 @@ void ModloaderEditor::refreshPatternHeader()
     {
         refreshShuffle();
         refreshMixMute();
+        refreshRun();
         return;
     }
     for (int machine = 0; machine < 2; ++machine)
@@ -1775,6 +1842,7 @@ void ModloaderEditor::refreshPatternHeader()
     }
     refreshShuffle();
     refreshMixMute();
+    refreshRun();
 }
 
 void ModloaderEditor::refreshShuffle()
@@ -1800,6 +1868,51 @@ void ModloaderEditor::refreshMixMute()
     mixMuteOn.setToggleState (on, juce::dontSendNotification);
 }
 
+void ModloaderEditor::refreshRun()
+{
+    const bool have = focusedMachine >= 0;
+    runOn.setEnabled (have);
+    runN.setEnabled (have);
+    runN.setColour (juce::Label::textColourId, have ? kMuted : kMuted.withAlpha (0.5f));
+    bool on = false;
+    if (have)
+    {
+        const auto id = focusedMachine == 0 ? ModloaderProcessor::p808Id (0)
+                                            : ModloaderProcessor::p909Id (0);
+        if (auto* v = proc.apvts.getRawParameterValue (id))
+            on = v->load() >= 0.5f;
+    }
+    runOn.setToggleState (on, juce::dontSendNotification);
+}
+
+void ModloaderEditor::refreshMidiDrag()
+{
+    const bool have = focusedMachine >= 0;
+    midiDrag.setEnabled (have);
+    midiDrag.setTooltip (have
+        ? (focusedMachine == 0 ? "Drag 808 pattern to a sequencer track"
+                               : "Drag 909 pattern to a sequencer track")
+        : "Focus a machine, then drag its pattern to a sequencer track");
+}
+
+void ModloaderEditor::startPatternMidiDrag()
+{
+    if (focusedMachine < 0)
+        return;
+    uint8_t pat[kPatLen];
+    if (! loadFocusedPattern (pat))
+        return;
+    uint8_t shuffleAmount = 64;
+    if (auto* v = proc.apvts.getRawParameterValue ("shuffle"))
+        shuffleAmount = (uint8_t) juce::jlimit (0, 127, juce::roundToInt (v->load()));
+    const auto name = focusedMachine == 0 ? "OpenRB-Modloader-808.mid"
+                                          : "OpenRB-Modloader-909.mid";
+    const auto file = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile (name);
+    if (! patternmidi::writeFile (file, focusedMachine, pat, shuffleAmount))
+        return;
+    performExternalDragDropOfFiles ({ file.getFullPathName() }, false);
+}
+
 void ModloaderEditor::setMixMute (bool on)
 {
     if (focusedMachine < 0)
@@ -1808,6 +1921,17 @@ void ModloaderEditor::setMixMute (bool on)
         param->setValueNotifyingHost (on ? 1.0f : 0.0f);
     refreshMixMute();
     repaint();
+}
+
+void ModloaderEditor::setRun (bool on)
+{
+    if (focusedMachine < 0)
+        return;
+    const auto id = focusedMachine == 0 ? ModloaderProcessor::p808Id (0)
+                                        : ModloaderProcessor::p909Id (0);
+    if (auto* param = proc.apvts.getParameter (id))
+        param->setValueNotifyingHost (on ? 1.0f : 0.0f);
+    refreshRun();
 }
 
 void ModloaderEditor::sync808Radios()
@@ -1921,6 +2045,8 @@ void ModloaderEditor::handleNestedMouseDown (const juce::MouseEvent& e)
         toggleModPicker();
     if (! e.mods.isPopupMenu() && e.eventComponent == &mixMuteN && mixMuteN.isEnabled())
         setMixMute (! mixMuteOn.getToggleState());
+    if (! e.mods.isPopupMenu() && e.eventComponent == &runN && runN.isEnabled())
+        setRun (! runOn.getToggleState());
 }
 
 void ModloaderEditor::toggleModPicker()
@@ -2565,6 +2691,8 @@ void ModloaderEditor::updateMachineFocus (juce::Point<int> pos)
     focusedMachine = next;
     refreshShuffle();
     refreshMixMute();
+    refreshRun();
+    refreshMidiDrag();
     repaint();
 }
 
@@ -2738,6 +2866,12 @@ void ModloaderEditor::resized()
     mixMuteOn.setBounds (top.removeFromRight (shuffleTick).withSizeKeepingCentre (shuffleTick, shuffleTick));
     const int muteLabelW = captionLabelWidth ("MUTE") + 2;
     mixMuteN.setBounds (top.removeFromRight (muteLabelW).withSizeKeepingCentre (muteLabelW, 14));
+    top.removeFromRight (40);
+    midiDrag.setBounds (top.removeFromRight (shuffleTick).withSizeKeepingCentre (shuffleTick, shuffleTick));
+    top.removeFromRight (40);
+    runOn.setBounds (top.removeFromRight (shuffleTick).withSizeKeepingCentre (shuffleTick, shuffleTick));
+    const int runLabelW = captionLabelWidth ("RUN") + 2;
+    runN.setBounds (top.removeFromRight (runLabelW).withSizeKeepingCentre (runLabelW, 14));
     status.setBounds (top.withY (bandY).withHeight (bandH));
 
     auto placePattern = [this] (PatternUi& ui, juce::Rectangle<int> r, bool withFlam, bool withSplash)

@@ -141,6 +141,40 @@ fn step_trigger_makes_sound() {
     assert!(energy(&left[BLOCK..]) > 0.0, "main mix includes BD");
 }
 
+/// A MIDI hit sounds even when the machine's Enable (pattern section) is off.
+#[test]
+fn midi_hit_makes_sound_when_disabled() {
+    let mut m = Modloader::new();
+    let mut params = Params::default();
+    params.p808[tr808::ENABLED] = 0;
+    params.p808[tr808::BD_LEVEL] = 127;
+    params.p808[tr808::ACCENT] = 127;
+    params.p909[tr909::ENABLED] = 0;
+    params.p909[tr909::BD_LEVEL] = 127;
+    params.p909[tr909::ACCENT] = 127;
+
+    m.midi_trigger(0, tr808::BD as u8, 100);
+    m.midi_trigger(1, tr909::BD as u8, 100);
+
+    let n = BLOCK * 4;
+    let (left, mix808, mix909, aux) = run_all(&mut m, params, playing(0.0), n);
+    assert!(
+        left[..BLOCK].iter().all(|&x| x == 0.0),
+        "first block is the delay"
+    );
+    assert!(
+        energy(&aux[tr808::VOICE_BD][BLOCK..]) > 0.0,
+        "808 BD aux should ring from MIDI with Enable off"
+    );
+    assert!(
+        energy(&aux[tr808::VOICES + tr909::VOICE_BD][BLOCK..]) > 0.0,
+        "909 BD aux should ring from MIDI with Enable off"
+    );
+    assert!(energy(&mix808[BLOCK..]) > 0.0, "808 mix includes MIDI BD");
+    assert!(energy(&mix909[BLOCK..]) > 0.0, "909 mix includes MIDI BD");
+    assert!(energy(&left[BLOCK..]) > 0.0, "main mix includes MIDI BD");
+}
+
 /// `set_samples` (reload Standard) keeps pattern bytes.
 #[test]
 fn mod_swap_keeps_pattern() {

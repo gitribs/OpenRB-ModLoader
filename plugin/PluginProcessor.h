@@ -6,6 +6,7 @@
 #include <array>
 #include <atomic>
 #include <memory>
+#include <optional>
 
 class ModloaderEditor;
 
@@ -42,15 +43,16 @@ public:
 
     const juce::String getName() const override { return JucePlugin_Name; }
     const juce::String getOutputChannelName (int index) const override;
-    bool acceptsMidi() const override { return false; }
+    bool acceptsMidi() const override { return true; }
     bool producesMidi() const override { return false; }
     bool isMidiEffect() const override { return false; }
     double getTailLengthSeconds() const override { return 4.0; }
+    std::optional<juce::String> getNameForMidiNoteNumber (int note, int midiChannel) override;
 
     int getNumPrograms() override { return 1; }
     int getCurrentProgram() override { return 0; }
     void setCurrentProgram (int) override {}
-    const juce::String getProgramName (int) override { return {}; }
+    const juce::String getProgramName (int) override { return "OpenRB Modloader"; }
     void changeProgramName (int, const juce::String&) override {}
 
     void getStateInformation (juce::MemoryBlock& destData) override;
@@ -99,6 +101,7 @@ private:
     static juce::AudioProcessor::BusesProperties createBuses();
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
     void processBuffer (juce::AudioBuffer<float>& buffer, bool bypass);
+    void applyIncomingMidi (const juce::MidiBuffer& midi);
     OrbModloaderParams readParams (bool bypass) const;
     OrbModloaderPlayhead readPlayhead (int nHost);
     void clearPlayClock();

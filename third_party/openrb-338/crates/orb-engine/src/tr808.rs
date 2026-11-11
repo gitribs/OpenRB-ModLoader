@@ -200,6 +200,16 @@ impl Tr808 {
         }
     }
 
+    /// Fire instrument `col` (1..=11) from MIDI. Does not consult [`Tr808::enabled`].
+    pub fn midi_hit(&mut self, col: usize, velocity: u8) {
+        if !(1..=11).contains(&col) || velocity == 0 {
+            return;
+        }
+        let t = (velocity as f64 - 100.0).max(0.0) / 27.0;
+        self.accent = st(ACC_BASE + t * self.live[ACCENT] as f64 * ACC_STEP as f64);
+        self.trigger(col);
+    }
+
     fn pattern(&self, p: u8) -> &[u8] {
         let at = p as usize * PATTERN_LEN;
         &self.patterns[at..at + PATTERN_LEN]

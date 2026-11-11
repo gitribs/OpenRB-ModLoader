@@ -147,7 +147,7 @@ juce_add_plugin(OpenRbModloader
     PLUGIN_NAME "OpenRB Modloader"
     DESCRIPTION "ReBirth TR-808 and TR-909"
     IS_SYNTH TRUE
-    NEEDS_MIDI_INPUT FALSE
+    NEEDS_MIDI_INPUT TRUE
     NEEDS_MIDI_OUTPUT FALSE
     IS_MIDI_EFFECT FALSE
     EDITOR_WANTS_KEYBOARD_FOCUS FALSE
@@ -166,6 +166,7 @@ target_sources(OpenRbModloader
         plugin/PluginProcessor.h
         plugin/PluginEditor.cpp
         plugin/PluginEditor.h
+        plugin/PatternMidi.h
 )
 
 target_include_directories(OpenRbModloader PRIVATE include)

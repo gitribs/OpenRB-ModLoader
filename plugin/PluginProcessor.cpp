@@ -1,5 +1,6 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include "PatternMidi.h"
 
 #include <algorithm>
 #include <cmath>
@@ -841,16 +842,37 @@ void ModloaderProcessor::processBuffer (juce::AudioBuffer<float>& buffer, bool b
         fillBusFrom (getBusBuffer (buffer, false, i + kAuxBus0), hostOut[i + 2 + kMixChannels], nHost);
 }
 
+void ModloaderProcessor::applyIncomingMidi (const juce::MidiBuffer& midi)
+{
+    if (engine_ == nullptr)
+        return;
+    for (const auto metadata : midi)
+    {
+        const auto msg = metadata.getMessage();
+        if (! msg.isNoteOn())
+            continue;
+        int machine = 0, col = 0;
+        if (! patternmidi::noteToDrum (msg.getNoteNumber(), machine, col))
+            continue;
+        orb_modloader_trigger (engine_.get(), machine, (uint8_t) col, msg.getVelocity());
+    }
+}
+
 void ModloaderProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
-    juce::ignoreUnused (midi);
+    applyIncomingMidi (midi);
     processBuffer (buffer, false);
 }
 
 void ModloaderProcessor::processBlockBypassed (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
-    juce::ignoreUnused (midi);
+    applyIncomingMidi (midi);
     processBuffer (buffer, true);
+}
+
+std::optional<juce::String> ModloaderProcessor::getNameForMidiNoteNumber (int note, int)
+{
+    return patternmidi::nameForNote (note);
 }
 
 juce::AudioProcessorEditor* ModloaderProcessor::createEditor()
