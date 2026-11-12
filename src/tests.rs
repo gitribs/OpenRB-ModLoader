@@ -708,6 +708,66 @@ fn rbs_song_mode_tracks_roundtrip() {
     assert_eq!(m.get_step(0, 0, 1, tr808::BD as u8), 1);
 }
 
+/// 808/909 TRAK dump for a DAW print take; pattern changes after tick 0 are included.
+#[test]
+fn copy_song_events_808_pattern_change() {
+    use orb_engine::song::TICKS_PER_BAR;
+    let mut file = rbs::Song::empty();
+    file.glob.song_mode = 1;
+    file.tr808.params = crate::Params::default().p808.to_vec();
+    file.tracks[3].events = vec![
+        rbs::Event {
+            pos: 0,
+            ctrl: 1,
+            value: 0,
+        },
+        rbs::Event {
+            pos: 32,
+            ctrl: 1,
+            value: 3,
+        },
+    ];
+    let bytes = file.write().expect("write rbs");
+    let mut m = Modloader::new();
+    m.load_song(&bytes).expect("load");
+    let evs = m.song_events();
+    assert!(
+        evs.iter()
+            .any(|e| e.machine == 0 && e.ctrl == 1 && e.value == 3 && e.tick == TICKS_PER_BAR as i32),
+        "pattern change at bar 2 is in the dump"
+    );
+    assert!(
+        evs.iter()
+            .any(|e| e.machine == 0 && e.ctrl == tr808::BD_LEVEL as u8 && e.tick == 0),
+        "tick-0 snapshot includes static knobs"
+    );
+    assert!(
+        !evs.iter()
+            .any(|e| e.machine == 0 && e.ctrl == tr808::BD_LEVEL as u8 && e.tick > 0),
+        "static knobs have no later events"
+    );
+}
+
+/// Print-to-host ignores incoming 808/909 panel values so DAW write-back cannot fight TRAKs.
+#[test]
+fn print_to_host_ignores_drum_panel() {
+    let mut m = Modloader::new();
+    let mut params = Params::default();
+    run(&mut m, params, playing(0.0), 64);
+    m.set_song_mode(true);
+    m.init_from_pattern(false);
+    m.set_print(true);
+    let before = m.live_params().p808[tr808::BD_LEVEL];
+    params.p808[tr808::BD_LEVEL] = 20;
+    run_host(&mut m, params, 0.0, 4.0);
+    assert_eq!(
+        m.live_params().p808[tr808::BD_LEVEL],
+        before,
+        "print take does not apply host 808 knobs"
+    );
+    m.set_print(false);
+}
+
 /// Record in song mode writes a pattern-select event; grid edits do not.
 #[test]
 fn song_record_pattern_not_grid() {

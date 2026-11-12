@@ -7,10 +7,12 @@
 #include <atomic>
 #include <memory>
 #include <optional>
+#include <vector>
 
 class ModloaderEditor;
 
-class ModloaderProcessor final : public juce::AudioProcessor
+class ModloaderProcessor final : public juce::AudioProcessor,
+                                 private juce::AsyncUpdater
 {
 public:
     static constexpr int kAuxBuses = ORB_MODLOADER_AUX;
@@ -84,6 +86,10 @@ public:
     /// Load the scanned kit whose name matches `name` (case-insensitive). Returns the index, or -1.
     int loadModByName (const juce::String& name);
 
+    /// Arm or cancel a song-mode print take (808/909 TRAKs → host automation). Standalone is a no-op.
+    bool setPrintArmed (bool on);
+    bool isPrintArmed() const noexcept { return printArmed.load(); }
+
     juce::AudioProcessorValueTreeState apvts;
     PatternClipboard patternClip;
     OrbModloader* engine() noexcept { return engine_.get(); }
@@ -116,6 +122,17 @@ private:
     void applySongParams (const OrbModloaderSong& song);
     void fillSongParams (OrbModloaderSong& song) const;
 
+    void handleAsyncUpdate() override;
+    void armPrint();
+    void disarmPrint();
+    void runPrintTake (bool hostPlaying);
+    void queuePrintValue (int index, uint8_t value);
+    void chasePrintAt (int tick);
+    void emitPrintRange (int fromTick, int toTick);
+    juce::RangedAudioParameter* printParam (int index) const;
+    static int printIndex (uint8_t machine, uint8_t ctrl);
+    static bool printIsBool (int index);
+
     std::unique_ptr<OrbModloader, EngineDeleter> engine_;
     std::atomic<float>* muteMain808 = nullptr;
     std::atomic<float>* muteMain909 = nullptr;
@@ -139,6 +156,18 @@ private:
     double lastRawPpq = 0.0;
     bool haveLastSamples = false;
     juce::int64 lastSamples = 0;
+
+    static constexpr int kPrintParams = ORB_MODLOADER_P808 + ORB_MODLOADER_P909;
+    juce::SpinLock printLock;
+    std::vector<OrbModloaderTrackEvent> printEvents;
+    std::array<bool, kPrintParams> printMoving {};
+    std::array<uint8_t, kPrintParams> printPending {};
+    std::array<bool, kPrintParams> printPendingOn {};
+    std::array<bool, kPrintParams> printGesturing {};
+    std::atomic<bool> printArmed { false };
+    std::atomic<bool> printStopPending { false };
+    bool printTakeActive = false;
+    int printLastTick = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ModloaderProcessor)
 };

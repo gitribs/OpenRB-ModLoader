@@ -18,6 +18,7 @@ static_assert (offsetof (OrbModloaderSong, song_mode) == 147);
 static_assert (offsetof (OrbModloaderSong, tempo) == 152);
 static_assert (sizeof (OrbModloaderSong) == 164);
 static_assert (sizeof (OrbModloaderPlayhead) == 24);
+static_assert (sizeof (OrbModloaderTrackEvent) == 8);
 
 constexpr uint32_t kTicksPerBar = 768;
 
@@ -264,6 +265,7 @@ void ModloaderProcessor::setModsFolder (const juce::String& path)
 
 void ModloaderProcessor::resetDevice()
 {
+    disarmPrint();
     for (auto* param : getParameters())
         if (auto* ranged = dynamic_cast<juce::RangedAudioParameter*> (param))
             ranged->setValueNotifyingHost (ranged->getDefaultValue());
@@ -418,6 +420,7 @@ bool ModloaderProcessor::loadSongFile (const juce::File& file, juce::String& err
         return false;
     }
 
+    disarmPrint();
     applySongParams (song);
     songEffects_ = {};
     copySongFx (songEffects_, song);
@@ -497,7 +500,269 @@ int ModloaderProcessor::loadModByName (const juce::String& name)
     return -1;
 }
 
-ModloaderProcessor::~ModloaderProcessor() = default;
+ModloaderProcessor::~ModloaderProcessor()
+{
+    cancelPendingUpdate();
+    for (int i = 0; i < kPrintParams; ++i)
+        if (printGesturing[(size_t) i])
+            if (auto* p = printParam (i))
+                p->endChangeGesture();
+    if (engine_)
+        orb_modloader_set_print (engine_.get(), 0);
+}
+
+int ModloaderProcessor::printIndex (uint8_t machine, uint8_t ctrl)
+{
+    if (machine == 0 && ctrl < ORB_MODLOADER_P808)
+        return (int) ctrl;
+    if (machine == 1 && ctrl < ORB_MODLOADER_P909)
+        return ORB_MODLOADER_P808 + (int) ctrl;
+    return -1;
+}
+
+bool ModloaderProcessor::printIsBool (int index)
+{
+    if (index == 0 || index == ORB_MODLOADER_P808)
+        return true;
+    return index < ORB_MODLOADER_P808 && isSwitch808 (index);
+}
+
+juce::RangedAudioParameter* ModloaderProcessor::printParam (int index) const
+{
+    juce::String id;
+    if (index < ORB_MODLOADER_P808)
+        id = p808Id (index);
+    else if (index < kPrintParams)
+        id = p909Id (index - ORB_MODLOADER_P808);
+    else
+        return nullptr;
+    return apvts.getParameter (id);
+}
+
+void ModloaderProcessor::queuePrintValue (int index, uint8_t value)
+{
+    if (index < 0 || index >= kPrintParams)
+        return;
+    printPending[(size_t) index] = value;
+    printPendingOn[(size_t) index] = true;
+}
+
+void ModloaderProcessor::chasePrintAt (int tick)
+{
+    for (int i = 0; i < kPrintParams; ++i)
+    {
+        if (! printMoving[(size_t) i])
+            continue;
+        const uint8_t machine = i < ORB_MODLOADER_P808 ? 0 : 1;
+        const uint8_t ctrl = (uint8_t) (i < ORB_MODLOADER_P808 ? i : i - ORB_MODLOADER_P808);
+        bool found = false;
+        uint8_t value = 0;
+        for (const auto& e : printEvents)
+        {
+            if (e.machine != machine || e.ctrl != ctrl || e.tick > tick)
+                continue;
+            found = true;
+            value = e.value;
+        }
+        if (found)
+            queuePrintValue (i, value);
+    }
+}
+
+void ModloaderProcessor::emitPrintRange (int fromTick, int toTick)
+{
+    for (const auto& e : printEvents)
+    {
+        if (e.tick <= fromTick || e.tick > toTick)
+            continue;
+        const int index = printIndex (e.machine, e.ctrl);
+        if (index >= 0 && printMoving[(size_t) index])
+            queuePrintValue (index, e.value);
+    }
+}
+
+void ModloaderProcessor::armPrint()
+{
+    if (wrapperType == wrapperType_Standalone || engine_ == nullptr)
+        return;
+
+    for (int i = 0; i < kPrintParams; ++i)
+    {
+        if (! printGesturing[(size_t) i])
+            continue;
+        printGesturing[(size_t) i] = false;
+        if (auto* p = printParam (i))
+            p->endChangeGesture();
+    }
+
+    const int n = orb_modloader_copy_song_events (engine_.get(), nullptr, 0);
+    std::vector<OrbModloaderTrackEvent> events ((size_t) juce::jmax (0, n));
+    if (n > 0)
+        orb_modloader_copy_song_events (engine_.get(), events.data(), n);
+
+    std::array<bool, kPrintParams> moving {};
+    for (const auto& e : events)
+    {
+        const int index = printIndex (e.machine, e.ctrl);
+        if (index >= 0 && e.tick > 0)
+            moving[(size_t) index] = true;
+    }
+
+    orb_modloader_set_record (engine_.get(), 0);
+    orb_modloader_set_print (engine_.get(), 1);
+
+    {
+        const juce::SpinLock::ScopedLockType sl (printLock);
+        printEvents = std::move (events);
+        printMoving = moving;
+        printPendingOn.fill (false);
+        printTakeActive = false;
+        printLastTick = 0;
+        printStopPending = false;
+        printArmed = true;
+    }
+}
+
+void ModloaderProcessor::disarmPrint()
+{
+    {
+        const juce::SpinLock::ScopedLockType sl (printLock);
+        printArmed = false;
+        printTakeActive = false;
+        printStopPending = false;
+        printEvents.clear();
+        printMoving.fill (false);
+        printPendingOn.fill (false);
+    }
+
+    if (engine_)
+        orb_modloader_set_print (engine_.get(), 0);
+
+    for (int i = 0; i < kPrintParams; ++i)
+    {
+        if (! printGesturing[(size_t) i])
+            continue;
+        printGesturing[(size_t) i] = false;
+        if (auto* p = printParam (i))
+            p->endChangeGesture();
+    }
+
+    applyLivePanelParams();
+}
+
+bool ModloaderProcessor::setPrintArmed (bool on)
+{
+    if (on)
+        armPrint();
+    else
+        disarmPrint();
+    return isPrintArmed();
+}
+
+void ModloaderProcessor::runPrintTake (bool hostPlaying)
+{
+    if (wrapperType == wrapperType_Standalone || engine_ == nullptr || ! printArmed.load())
+        return;
+
+    OrbModloaderTransport t {};
+    orb_modloader_transport (engine_.get(), &t);
+    if (t.song_mode == 0)
+        return;
+
+    bool notify = false;
+    {
+        const juce::SpinLock::ScopedLockType sl (printLock);
+        if (! printArmed.load())
+            return;
+
+        if (! hostPlaying)
+        {
+            if (printTakeActive)
+            {
+                printTakeActive = false;
+                printArmed = false;
+                printStopPending = true;
+                notify = true;
+            }
+        }
+        else
+        {
+            if (! printTakeActive || t.tick < printLastTick)
+                chasePrintAt (t.tick);
+            else
+                emitPrintRange (printLastTick, t.tick);
+            printTakeActive = true;
+            printLastTick = t.tick;
+            for (bool on : printPendingOn)
+            {
+                if (on)
+                {
+                    notify = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (notify)
+        triggerAsyncUpdate();
+}
+
+void ModloaderProcessor::handleAsyncUpdate()
+{
+    std::array<uint8_t, kPrintParams> values {};
+    std::array<bool, kPrintParams> on {};
+    bool stop = false;
+    {
+        const juce::SpinLock::ScopedLockType sl (printLock);
+        values = printPending;
+        on = printPendingOn;
+        printPendingOn.fill (false);
+        stop = printStopPending.exchange (false);
+    }
+
+    for (int i = 0; i < kPrintParams; ++i)
+    {
+        if (! on[(size_t) i])
+            continue;
+        auto* p = printParam (i);
+        if (p == nullptr)
+            continue;
+        if (! printGesturing[(size_t) i])
+        {
+            p->beginChangeGesture();
+            printGesturing[(size_t) i] = true;
+        }
+        const uint8_t v = values[(size_t) i];
+        if (printIsBool (i))
+            p->setValueNotifyingHost (v != 0 ? 1.0f : 0.0f);
+        else
+            p->setValueNotifyingHost (p->convertTo0to1 ((float) v));
+    }
+
+    if (stop)
+    {
+        {
+            const juce::SpinLock::ScopedLockType sl (printLock);
+            printEvents.clear();
+            printMoving.fill (false);
+            printPendingOn.fill (false);
+            printTakeActive = false;
+            printArmed = false;
+        }
+        if (engine_)
+            orb_modloader_set_print (engine_.get(), 0);
+        for (int i = 0; i < kPrintParams; ++i)
+        {
+            if (! printGesturing[(size_t) i])
+                continue;
+            printGesturing[(size_t) i] = false;
+            if (auto* p = printParam (i))
+                p->endChangeGesture();
+        }
+        applyLivePanelParams();
+    }
+}
 
 juce::AudioProcessorValueTreeState::ParameterLayout ModloaderProcessor::createLayout()
 {
@@ -850,6 +1115,7 @@ void ModloaderProcessor::processBuffer (juce::AudioBuffer<float>& buffer, bool b
         for (int i = 0; i < kAuxBuses; ++i)
             attachAux (i, auxPtr[i]);
         orb_modloader_process (engine_.get(), mainL, mainR, mix808L, mix909L, auxPtr, nHost, &params, &head);
+        runPrintTake (head.playing != 0);
         applyMainMute (mainL, mainR, mix808L, mix909L, params.direct_mix808 != 0, params.direct_mix909 != 0, nHost);
         fillBusFrom (getBusBuffer (buffer, false, 1), mix808L, nHost);
         fillBusFrom (getBusBuffer (buffer, false, 2), mix909L, nHost);
@@ -879,6 +1145,7 @@ void ModloaderProcessor::processBuffer (juce::AudioBuffer<float>& buffer, bool b
         float* eng909 = engineBuf.getWritePointer (4);
         orb_modloader_process (engine_.get(), engineBuf.getWritePointer (0), engineBuf.getWritePointer (1),
                                eng808, eng909, engAux, nEngine, &params, &head);
+        runPrintTake (head.playing != 0);
         std::memcpy (engineBuf.getWritePointer (3), eng808, (size_t) nEngine * sizeof (float));
         std::memcpy (engineBuf.getWritePointer (5), eng909, (size_t) nEngine * sizeof (float));
         applyMainMute (engineBuf.getWritePointer (0), engineBuf.getWritePointer (1), eng808, eng909,

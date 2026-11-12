@@ -148,6 +148,16 @@ private:
     bool dragging = false;
 };
 
+class PrintLaneButton final : public juce::Button
+{
+public:
+    PrintLaneButton();
+    void paintButton (juce::Graphics&, bool highlighted, bool down) override;
+    void mouseDown (const juce::MouseEvent&) override;
+    void mouseUp (const juce::MouseEvent&) override;
+    void enablementChanged() override { repaint(); }
+};
+
 class FxBadgeButton final : public juce::Button
 {
 public:
@@ -189,6 +199,7 @@ private:
     void refreshMixMute();
     void refreshRun();
     void refreshMidiDrag();
+    void refreshPrint();
     void startPatternMidiDrag();
     void refreshSplash();
     void refreshDisable();
@@ -266,6 +277,7 @@ private:
     ModToggleButton mixMuteOn;
     ModToggleButton runOn;
     MidiDragHandle midiDrag;
+    PrintLaneButton printBtn;
     ModSlider vol808, vol909;
     juce::AudioProcessorValueTreeState::SliderAttachment vol808A, vol909A;
 

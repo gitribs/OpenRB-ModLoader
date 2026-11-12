@@ -81,6 +81,17 @@ Record in song mode is ReBirth's: pattern buttons and knobs write TRAKs; the ste
 edits the pattern bank. Right-click Edit can initialize the song or the current loop from the
 pattern-mode state (with confirmation).
 
+The header control next to the MIDI drag handle **prints** 808/909 song-mode TRAKs into the
+DAW as named plugin-parameter automation (`808 Pattern`, `808 BD Decay`, and so on). Arm it,
+set the instrument track to Latch or Write (not Touch), play from bar 1 once, then stop.
+Only controllers that move after tick 0 are written. Turn Print off or stop the host to end
+the gestures. Then switch to **PATTERN** so the DAW owns playback; leaving song mode on
+lets TRAK chase fight the new lanes. Pattern-select lanes should be stepped/square, not
+linear ramps. Logic’s AU wrapper is the safer Logic path. Ableton Live is the host most
+likely to ignore plugin-originated gestures. Standalone has no Print control. Host loop
+off during the take; a looped pass rewrites the same points. 303, mixer, and effects
+TRAKs are not printed.
+
 Save writes a canonical 4.2 `.rbs` that ReBirth 2.x can open. 808 and 909 knobs and
 patterns are the current panel. Tracks come from the sequencer. 303s stay as they were
 in the last loaded file, or constructor defaults on a new song.

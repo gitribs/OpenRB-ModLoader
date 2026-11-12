@@ -128,6 +128,17 @@ impl From<PlayheadC> for Playhead {
     }
 }
 
+/// One 808/909 TRAK event for a DAW print take. `machine` is 0 808, 1 909.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(C)]
+pub struct TrackEventC {
+    pub tick: i32,
+    pub machine: u8,
+    pub ctrl: u8,
+    pub value: u8,
+    pub reserved: u8,
+}
+
 /// Song-mode transport snapshot for the panel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(C)]
@@ -394,6 +405,8 @@ pub struct Modloader {
     /// MIDI hits queued on the audio thread until the next 64-sample engine block.
     pending_midi: [(i32, u8, u8); 32],
     pending_midi_n: usize,
+    /// Host is printing 808/909 TRAKs to DAW automation; ignore those panel params.
+    print_to_host: bool,
 }
 
 impl Default for Modloader {
@@ -448,6 +461,7 @@ impl Modloader {
             splash: builtin_splash(),
             pending_midi: [(0, 0, 0); 32],
             pending_midi_n: 0,
+            print_to_host: false,
         };
         m.ensure_bound();
         m.init_device_tracks();
@@ -741,17 +755,21 @@ impl Modloader {
     }
 
     fn apply_panel_song(&mut self, p: &Params) {
-        for i in 0..P808 {
-            if p.p808[i] != self.last_params.p808[i] {
-                self.tr808.set_param(i as u8, p.p808[i]);
-                self.seq.record_hook(Device::Tr808, i as u8, p.p808[i]);
+        if !self.print_to_host {
+            for i in 0..P808 {
+                if p.p808[i] != self.last_params.p808[i] {
+                    self.tr808.set_param(i as u8, p.p808[i]);
+                    self.seq.record_hook(Device::Tr808, i as u8, p.p808[i]);
+                }
             }
-        }
-        for i in 0..P909 {
-            if p.p909[i] != self.last_params.p909[i] {
-                self.tr909.set_param(i as u8, p.p909[i]);
-                self.seq.record_hook(Device::Tr909, i as u8, p.p909[i]);
+            for i in 0..P909 {
+                if p.p909[i] != self.last_params.p909[i] {
+                    self.tr909.set_param(i as u8, p.p909[i]);
+                    self.seq.record_hook(Device::Tr909, i as u8, p.p909[i]);
+                }
             }
+            self.last_params.p808 = p.p808;
+            self.last_params.p909 = p.p909;
         }
         if p.mix808 != self.last_params.mix808 {
             self.devices.mixer.set_param(MIX_808_LEVEL, p.mix808);
@@ -761,8 +779,6 @@ impl Modloader {
             self.devices.mixer.set_param(MIX_909_LEVEL, p.mix909);
             self.seq.record_hook(Device::Mixer, MIX_909_LEVEL, p.mix909);
         }
-        self.last_params.p808 = p.p808;
-        self.last_params.p909 = p.p909;
         self.last_params.mix808 = p.mix808;
         self.last_params.mix909 = p.mix909;
         self.last_params.shuffle = p.shuffle;
@@ -872,6 +888,7 @@ impl Modloader {
 
     pub fn reset_song(&mut self) {
         self.kept_song = None;
+        self.print_to_host = false;
         self.seq = Sequencer::default();
         self.bound_at = 0;
         self.ensure_bound();
@@ -1003,6 +1020,37 @@ impl Modloader {
             return;
         }
         self.with_devices(|seq, dev| seq.set_record(u8::from(on), dev));
+    }
+
+    pub fn set_print(&mut self, on: bool) {
+        self.print_to_host = on;
+        if !on {
+            self.sync_last_params_from_live();
+        }
+    }
+
+    /// 808 then 909 TRAK events (controller bytes in panel / RBS order).
+    pub fn song_events(&self) -> Vec<TrackEventC> {
+        let mut out = Vec::new();
+        for (machine, max) in [(0u8, P808), (1u8, P909)] {
+            let track = if machine == 0 {
+                Device::Tr808.id() as usize
+            } else {
+                Device::Tr909.id() as usize
+            };
+            for e in self.seq.events(track) {
+                if (e.ctrl as usize) < max {
+                    out.push(TrackEventC {
+                        tick: e.tick,
+                        machine,
+                        ctrl: e.ctrl,
+                        value: e.value,
+                        reserved: 0,
+                    });
+                }
+            }
+        }
+        out
     }
 
     /// Replace song tracks with the pattern-mode snapshot. `loop_only` limits that to
@@ -1916,6 +1964,41 @@ pub unsafe extern "C" fn orb_modloader_set_loop_on(m: *mut Modloader, on: i32) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn orb_modloader_set_record(m: *mut Modloader, on: i32) {
     with_mut(m, |p| p.set_record(on != 0), ());
+}
+
+/// # Safety
+/// `m` from [`orb_modloader_new`], or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn orb_modloader_set_print(m: *mut Modloader, on: i32) {
+    with_mut(m, |p| p.set_print(on != 0), ());
+}
+
+/// Copy 808/909 TRAK events. If `buf` is null or `max` is 0, returns the count.
+///
+/// # Safety
+/// `m` from [`orb_modloader_new`]. `buf` is null or has `max` elements.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn orb_modloader_copy_song_events(
+    m: *mut Modloader,
+    buf: *mut TrackEventC,
+    max: i32,
+) -> i32 {
+    with_ref(
+        m,
+        |p| {
+            let events = p.song_events();
+            let n = events.len() as i32;
+            if buf.is_null() || max <= 0 {
+                return n;
+            }
+            let copy = events.len().min(max as usize);
+            unsafe {
+                std::ptr::copy_nonoverlapping(events.as_ptr(), buf, copy);
+            }
+            n
+        },
+        0,
+    )
 }
 
 /// Copy pattern-mode state onto the song. `loop_only` 1 is the current loop; 0 is the whole song.

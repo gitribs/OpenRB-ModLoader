@@ -641,6 +641,57 @@ void MidiDragHandle::mouseDrag (const juce::MouseEvent& e)
     repaint();
 }
 
+PrintLaneButton::PrintLaneButton() : juce::Button ({})
+{
+    setClickingTogglesState (true);
+}
+
+void PrintLaneButton::paintButton (juce::Graphics& g, bool highlighted, bool down)
+{
+    auto r = getLocalBounds().toFloat().reduced (0.5f);
+    g.setColour (kWell);
+    g.fillRoundedRectangle (r, 2.0f);
+    const bool on = isEnabled() && (getToggleState() || down);
+    g.setColour (! isEnabled() ? kLine.withAlpha (0.4f) : (highlighted || on ? kAmber : kLine));
+    g.drawRoundedRectangle (r, 2.0f, 1.0f);
+
+    auto inner = r.reduced (4.4f, 5.2f);
+    g.setColour (! isEnabled() ? kMuted.withAlpha (0.35f)
+                               : (on ? kAmber.withAlpha (0.45f) : kMuted.withAlpha (0.55f)));
+    g.drawLine (inner.getX(), inner.getBottom(), inner.getRight(), inner.getBottom(), 1.0f);
+
+    const float x0 = inner.getX();
+    const float x1 = inner.getX() + inner.getWidth() * 0.34f;
+    const float x2 = inner.getX() + inner.getWidth() * 0.66f;
+    const float x3 = inner.getRight();
+    const float y0 = inner.getBottom() - 1.2f;
+    const float y1 = inner.getY() + inner.getHeight() * 0.52f;
+    const float y2 = inner.getY() + 1.0f;
+    juce::Path stair;
+    stair.startNewSubPath (x0, y0);
+    stair.lineTo (x1, y0);
+    stair.lineTo (x1, y1);
+    stair.lineTo (x2, y1);
+    stair.lineTo (x2, y2);
+    stair.lineTo (x3, y2);
+    g.setColour (! isEnabled() ? kMuted.withAlpha (0.45f) : (on || highlighted ? kAmber : kText));
+    g.strokePath (stair, juce::PathStrokeType (on ? 1.6f : 1.2f,
+                                               juce::PathStrokeType::mitered,
+                                               juce::PathStrokeType::square));
+}
+
+void PrintLaneButton::mouseDown (const juce::MouseEvent& e)
+{
+    if (! e.mods.isPopupMenu())
+        juce::Button::mouseDown (e);
+}
+
+void PrintLaneButton::mouseUp (const juce::MouseEvent& e)
+{
+    if (! e.mods.isPopupMenu())
+        juce::Button::mouseUp (e);
+}
+
 class ModloaderEditor::ModPicker final : public juce::Component,
                                         public juce::ListBoxModel
 {
@@ -1614,6 +1665,30 @@ ModloaderEditor::ModloaderEditor (ModloaderProcessor& p)
     midiDrag.setMouseCursor (juce::MouseCursor::DraggingHandCursor);
     midiDrag.setRepaintsOnMouseActivity (true);
     addAndMakeVisible (midiDrag);
+    printBtn.setTooltip ("Arm, set the DAW to Latch or Write, play from bar 1 once, stop. Named "
+                         "808/909 lanes get the song's pattern changes and knob moves. Then switch "
+                         "to PATTERN so the DAW plays them.");
+    printBtn.onClick = [this]
+    {
+        if (standaloneTransport)
+        {
+            printBtn.setToggleState (false, juce::dontSendNotification);
+            return;
+        }
+        if (printBtn.getToggleState())
+        {
+            if (auto* e = eng())
+                orb_modloader_set_record (e, 0);
+            recBtn.setToggleState (false, juce::dontSendNotification);
+            recBtn.setLit (false);
+            proc.setPrintArmed (true);
+        }
+        else
+            proc.setPrintArmed (false);
+        refreshPrint();
+        refreshTransport();
+    };
+    addAndMakeVisible (printBtn);
 
     setupPatternSection (0);
     setupPatternSection (1);
@@ -1635,6 +1710,7 @@ ModloaderEditor::ModloaderEditor (ModloaderProcessor& p)
     pat909.shownBank = currentPattern (1) / 8;
     refreshPatternHeader();
     refreshMidiDrag();
+    refreshPrint();
     refreshModLabel();
     refreshSongLabel();
     refreshSplash();
@@ -1819,8 +1895,11 @@ void ModloaderEditor::setupTransport()
     };
     recBtn.onClick = [this]
     {
+        if (recBtn.getToggleState() && proc.isPrintArmed())
+            proc.setPrintArmed (false);
         if (auto* e = eng())
             orb_modloader_set_record (e, recBtn.getToggleState() ? 1 : 0);
+        refreshPrint();
         refreshTransport();
     };
 
@@ -1965,6 +2044,7 @@ void ModloaderEditor::setSongOpen (bool open)
     if (! standaloneTransport)
         setSize (kEditorW, open ? kEditorExpandedH : kEditorH);
     refreshTransport();
+    refreshPrint();
 }
 
 void ModloaderEditor::applyTransportVisibility()
@@ -2384,6 +2464,19 @@ void ModloaderEditor::refreshMidiDrag()
         ? (focusedMachine == 0 ? "Drag 808 pattern to a sequencer track"
                                : "Drag 909 pattern to a sequencer track")
         : "Focus a machine, then drag its pattern to a sequencer track");
+}
+
+void ModloaderEditor::refreshPrint()
+{
+    const bool daw = ! standaloneTransport;
+    printBtn.setVisible (daw);
+    printBtn.setEnabled (daw && songOpen);
+    if (! daw || ! songOpen)
+    {
+        if (proc.isPrintArmed())
+            proc.setPrintArmed (false);
+    }
+    printBtn.setToggleState (proc.isPrintArmed(), juce::dontSendNotification);
 }
 
 void ModloaderEditor::startPatternMidiDrag()
@@ -3214,6 +3307,7 @@ void ModloaderEditor::timerCallback()
     refreshModLabel();
     refreshFxBadges();
     refreshTransport();
+    refreshPrint();
     refreshSongKnobs();
     if (auto* e = eng())
         if (orb_modloader_current_mod (e) != splashMod)
@@ -3409,6 +3503,11 @@ void ModloaderEditor::resized()
     const int muteLabelW = captionLabelWidth ("MUTE") + 2;
     mixMuteN.setBounds (top.removeFromRight (muteLabelW).withSizeKeepingCentre (muteLabelW, 14));
     top.removeFromRight (40);
+    if (! standaloneTransport)
+    {
+        printBtn.setBounds (top.removeFromRight (shuffleTick).withSizeKeepingCentre (shuffleTick, shuffleTick));
+        top.removeFromRight (8);
+    }
     midiDrag.setBounds (top.removeFromRight (shuffleTick).withSizeKeepingCentre (shuffleTick, shuffleTick));
     top.removeFromRight (40);
     runOn.setBounds (top.removeFromRight (shuffleTick).withSizeKeepingCentre (shuffleTick, shuffleTick));

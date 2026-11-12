@@ -92,6 +92,14 @@ typedef struct OrbModloaderTransport {
     int32_t tick;
 } OrbModloaderTransport;
 
+typedef struct OrbModloaderTrackEvent {
+    int32_t tick;
+    uint8_t machine;
+    uint8_t ctrl;
+    uint8_t value;
+    uint8_t reserved;
+} OrbModloaderTrackEvent;
+
 OrbModloader *orb_modloader_new(void);
 void orb_modloader_free(OrbModloader *m);
 void orb_modloader_reset(OrbModloader *m);
@@ -144,6 +152,8 @@ void orb_modloader_loop_start_step(OrbModloader *m, int32_t delta_bars);
 void orb_modloader_loop_length_step(OrbModloader *m, int32_t delta_bars);
 void orb_modloader_set_loop_on(OrbModloader *m, int32_t on);
 void orb_modloader_set_record(OrbModloader *m, int32_t on);
+void orb_modloader_set_print(OrbModloader *m, int32_t on);
+int32_t orb_modloader_copy_song_events(OrbModloader *m, OrbModloaderTrackEvent *buf, int32_t max);
 void orb_modloader_init_from_pattern(OrbModloader *m, int32_t loop_only);
 void orb_modloader_set_tempo_bpm(OrbModloader *m, int32_t bpm);
 uint32_t orb_modloader_tempo_milli(OrbModloader *m);
