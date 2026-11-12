@@ -7,12 +7,14 @@ Panel JPEGs inside a mod are unused.
 
 The header open/save controls read and write authentic ReBirth 2.x `.rbs` songs. Load
 applies every 808 and 909 pattern and knob from the file and selects the named mod.
-303s, mixer, effects, and song-mode tracks are ignored. Save writes a 4.2 song with
-the current drums and blank 303s (default parameters, rest patterns).
+Song-mode pattern sequences and 808/909 automation are kept. 303s still do not sound.
+Save writes a 4.2 song with the current drums and the sequencer tracks.
 
 The machines always run at 44100 Hz in 64-sample blocks, the same grid the original uses. Host
-audio at any other rate is resampled on the way out. The host playhead drives the sequencers
-(pattern mode only). In the standalone app the tempo counter free-runs.
+audio at any other rate is resampled on the way out. Pattern mode follows the host playhead.
+In a DAW, song mode follows host play, stop, and position; tempo follows the DAW. Opening the
+transport strip enters song mode. Standalone keeps the transport visible and switches pattern/song
+with the PATTERN and SONG radios.
 
 This plugin is GPL-3.0-only. JUCE is pulled under its AGPLv3. The engine copy is the
 `orb-engine`, `rbs`, and `rbm` crates, under the same license. Copyright (C) 2026 the
@@ -64,17 +66,24 @@ The song name sits to the right of the mod picker. It shows the open `.rbs` file
 the floppy disk saves one. Settings stays to the right of those controls.
 
 Open uses the vendored `rbs` reader (file versions 4.0, 4.1, and 4.2, the ReBirth 2.x
-format) and the same 808 tom-tune conversion ReBirth applies to pre-4.2 files. Only
-the 808 and 909 devices are applied: all 32 patterns per machine, pattern lengths and
-shuffle flags, and the drum knobs including enable and the selected pattern. The GLOB
-mod name is matched against the scanned kit list (item 0 is Standard ReBirth). Tempo,
-vintage, mixer, delay, PCF, distortion, compressor, both 303s, and song-mode
-automation are not used.
+format) and the same 808 tom-tune conversion ReBirth applies to pre-4.2 files. The 808
+and 909 devices are applied: all 32 patterns per machine, pattern lengths and shuffle
+flags, drum knobs, GLOB tempo/loop/song-mode, and the nine song tracks. 808 and 909
+pattern-select and knob automation play; 303/fx tracks are stored and written back but
+do not sound. The GLOB mod name is matched against the scanned kit list (item 0 is
+Standard ReBirth). Distortion, PCF, and Delay remain a recall snapshot.
+
+A song saved in song mode opens the 909 fold arrow. In a DAW that also opens the transport
+strip (Record, bar, loop start/length); the host drives play, stop, and locate. Closing the
+strip returns to pattern mode without erasing the arrangement. Standalone always shows the
+transport (Play, Stop, rewind, forward, Record, bar, loop, tempo) and PATTERN/SONG radios.
+Record in song mode is ReBirth's: pattern buttons and knobs write TRAKs; the step grid still
+edits the pattern bank. Right-click Edit can initialize the song or the current loop from the
+pattern-mode state (with confirmation).
 
 Save writes a canonical 4.2 `.rbs` that ReBirth 2.x can open. 808 and 909 knobs and
-patterns are the current panel. 303s are constructor defaults with rest patterns.
-Mixer channels use the ReBirth defaults (master 100, level 100, pan centre). Overwriting
-an original song replaces its 303s and song tracks.
+patterns are the current panel. Tracks come from the sequencer. 303s stay as they were
+in the last loaded file, or constructor defaults on a new song.
 
 ## Buses
 
@@ -91,7 +100,8 @@ disabled. **MUTE** next to each sequencer omits the selected instrument from the
 and from that machine's Mix bus (Accent has no output). Header **MUTE** (focused machine)
 omits that machine from Output 1/2 and leaves its Mix bus and slot auxes alone. Host aux
 routing is independent of that. Instrument auxes are independent of the mixer faders.
-Tempo follows the host playhead.
+Pattern-mode tempo follows the host playhead. In a DAW, song mode follows the host
+transport; standalone uses the transport strip.
 
 ## Build
 

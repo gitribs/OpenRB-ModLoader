@@ -14,7 +14,12 @@ static_assert (offsetof (OrbModloaderParams, direct_mix909) == 86);
 static_assert (sizeof (OrbModloaderParams) == 87);
 static_assert (offsetof (OrbModloaderSong, dist_enabled) == 127);
 static_assert (offsetof (OrbModloaderSong, delay_send_909) == 146);
-static_assert (sizeof (OrbModloaderSong) == 147);
+static_assert (offsetof (OrbModloaderSong, song_mode) == 147);
+static_assert (offsetof (OrbModloaderSong, tempo) == 152);
+static_assert (sizeof (OrbModloaderSong) == 164);
+static_assert (sizeof (OrbModloaderPlayhead) == 24);
+
+constexpr uint32_t kTicksPerBar = 768;
 
 namespace
 {
@@ -238,6 +243,9 @@ ModloaderProcessor::ModloaderProcessor()
         if (rememberedMods.isNotEmpty())
             orb_modloader_scan (engine_.get(), rememberedMods.toRawUTF8());
     }
+
+    if (wrapperType == wrapperType_Standalone)
+        orb_modloader_play (engine_.get());
 }
 
 void ModloaderProcessor::setKeyPath (const juce::String& path)
@@ -268,7 +276,10 @@ void ModloaderProcessor::resetDevice()
     {
         orb_modloader_set_patterns (engine_.get(), 0, empty.data(), kPatternBytes);
         orb_modloader_set_patterns (engine_.get(), 1, empty.data(), kPatternBytes);
+        orb_modloader_reset_song (engine_.get());
         orb_modloader_reset (engine_.get());
+        if (wrapperType == wrapperType_Standalone)
+            orb_modloader_play (engine_.get());
     }
     songFile = juce::File();
     songModName = {};
@@ -293,6 +304,21 @@ juce::String ModloaderProcessor::songDisplayName() const
         return "unsaved";
     const auto name = songFile.getFileNameWithoutExtension();
     return name.isNotEmpty() ? name : "unsaved";
+}
+
+void ModloaderProcessor::applyLivePanelParams()
+{
+    if (engine_ == nullptr)
+        return;
+    OrbModloaderParams live {};
+    orb_modloader_live_params (engine_.get(), &live);
+    OrbModloaderSong song {};
+    std::memcpy (song.p808, live.p808, sizeof song.p808);
+    std::memcpy (song.p909, live.p909, sizeof song.p909);
+    song.shuffle = live.shuffle;
+    song.mix808 = live.mix808;
+    song.mix909 = live.mix909;
+    applySongParams (song);
 }
 
 void ModloaderProcessor::applySongParams (const OrbModloaderSong& song)
@@ -348,6 +374,16 @@ void ModloaderProcessor::fillSongParams (OrbModloaderSong& song) const
                             name, (int) sizeof name);
     std::strncpy (song.mod_name, name, sizeof song.mod_name - 1);
     copySongFx (song, songEffects_);
+
+    OrbModloaderTransport t {};
+    orb_modloader_transport (engine_.get(), &t);
+    song.song_mode = t.song_mode != 0 ? 1 : 0;
+    song.loop_on = t.loop_on != 0 ? 1 : 0;
+    song.tempo = orb_modloader_tempo_milli (engine_.get());
+    const auto startBar = juce::jmax (1, t.start);
+    const auto lengthBars = juce::jmax (1, t.length);
+    song.loop_start = (uint32_t) (startBar - 1) * kTicksPerBar;
+    song.loop_end = song.loop_start + (uint32_t) lengthBars * kTicksPerBar;
 }
 
 bool ModloaderProcessor::loadSongFile (const juce::File& file, juce::String& error)
@@ -535,6 +571,8 @@ void ModloaderProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 
     if (engine_)
         orb_modloader_reset (engine_.get());
+    if (wrapperType == wrapperType_Standalone && engine_)
+        orb_modloader_play (engine_.get());
 
     clearPlayClock();
     setLatencySamples (latencySamples());
@@ -650,14 +688,24 @@ static double startingQuarter (double rawPpq, bool hasPpq, juce::int64 samples, 
 
 OrbModloaderPlayhead ModloaderProcessor::readPlayhead (int nHost)
 {
-    OrbModloaderPlayhead head { 120.0, 0.0, 0 };
+    OrbModloaderPlayhead head { 120.0, 0.0, 0, 0 };
     const bool standalone = wrapperType == wrapperType_Standalone;
     if (standalone)
     {
-        head.bpm = 120.0;
-        head.playing = 1;
+        const double bpm = engine_ != nullptr
+                               ? (double) orb_modloader_tempo_milli (engine_.get()) / 1000.0
+                               : 120.0;
+        head.bpm = bpm > 0.0 ? bpm : 120.0;
+        if (engine_ != nullptr)
+        {
+            OrbModloaderTransport t {};
+            orb_modloader_transport (engine_.get(), &t);
+            head.playing = t.playing;
+        }
         return head;
     }
+
+    head.host_driven = 1;
 
     if (auto* ph = getPlayHead())
     {
@@ -923,6 +971,20 @@ void ModloaderProcessor::getStateInformation (juce::MemoryBlock& destData)
         xml->setAttribute ("fxDelayPan", (int) songEffects_.delay_pan);
         xml->setAttribute ("fxDelaySend808", (int) songEffects_.delay_send_808);
         xml->setAttribute ("fxDelaySend909", (int) songEffects_.delay_send_909);
+
+        OrbModloaderSong song {};
+        fillSongParams (song);
+        const int needed = orb_modloader_save_song (engine_.get(), &song, nullptr, 0);
+        if (needed > 0)
+        {
+            juce::HeapBlock<uint8_t> rbs ((size_t) needed);
+            const int n = orb_modloader_save_song (engine_.get(), &song, rbs.getData(), needed);
+            if (n > 0 && n <= needed)
+                xml->setAttribute ("songRbs", juce::Base64::toBase64 (rbs.getData(), (size_t) n));
+        }
+        OrbModloaderTransport t {};
+        orb_modloader_transport (engine_.get(), &t);
+        xml->setAttribute ("songMode", t.song_mode);
     }
 
     copyXmlToBinary (*xml, destData);
@@ -1007,6 +1069,25 @@ void ModloaderProcessor::setStateInformation (const void* data, int sizeInBytes)
     songEffects_.delay_pan = fxByte (*xml, "fxDelayPan");
     songEffects_.delay_send_808 = fxByte (*xml, "fxDelaySend808");
     songEffects_.delay_send_909 = fxByte (*xml, "fxDelaySend909");
+
+    const auto rbsB64 = xml->getStringAttribute ("songRbs");
+    if (rbsB64.isNotEmpty())
+    {
+        juce::MemoryOutputStream out;
+        if (juce::Base64::convertFromBase64 (out, rbsB64) && out.getDataSize() > 0)
+        {
+            OrbModloaderSong loaded {};
+            if (orb_modloader_load_song (engine_.get(), (const uint8_t*) out.getData(),
+                                         (int) out.getDataSize(), &loaded) != 0)
+            {
+                songEffects_ = {};
+                copySongFx (songEffects_, loaded);
+                songModName = juce::String::fromUTF8 (loaded.mod_name).trim();
+            }
+        }
+    }
+    else if (xml->getIntAttribute ("songMode", 0) != 0)
+        orb_modloader_set_song_mode (engine_.get(), 1);
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()

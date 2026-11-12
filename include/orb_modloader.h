@@ -40,6 +40,7 @@ typedef struct OrbModloaderPlayhead {
     double bpm;
     double ppq;
     int32_t playing;
+    int32_t host_driven;
 } OrbModloaderPlayhead;
 
 #define ORB_MODLOADER_MOD_NAME 65
@@ -71,7 +72,25 @@ typedef struct OrbModloaderSong {
     uint8_t delay_pan;
     uint8_t delay_send_808;
     uint8_t delay_send_909;
+    uint8_t song_mode;
+    uint8_t loop_on;
+    uint8_t reserved[3];
+    uint32_t tempo;
+    uint32_t loop_start;
+    uint32_t loop_end;
 } OrbModloaderSong;
+
+typedef struct OrbModloaderTransport {
+    int32_t song_mode;
+    int32_t playing;
+    int32_t recording;
+    int32_t loop_on;
+    int32_t bar;
+    int32_t start;
+    int32_t length;
+    int32_t tempo_bpm;
+    int32_t tick;
+} OrbModloaderTransport;
 
 OrbModloader *orb_modloader_new(void);
 void orb_modloader_free(OrbModloader *m);
@@ -112,6 +131,23 @@ int32_t orb_modloader_load(OrbModloader *m, int32_t index);
 int32_t orb_modloader_splash_jpeg(OrbModloader *m, uint8_t *buf, int32_t len);
 int32_t orb_modloader_load_song(OrbModloader *m, const uint8_t *data, int32_t len, OrbModloaderSong *out);
 int32_t orb_modloader_save_song(OrbModloader *m, const OrbModloaderSong *in, uint8_t *buf, int32_t len);
+
+void orb_modloader_reset_song(OrbModloader *m);
+void orb_modloader_transport(OrbModloader *m, OrbModloaderTransport *out);
+void orb_modloader_live_params(OrbModloader *m, OrbModloaderParams *out);
+void orb_modloader_set_song_mode(OrbModloader *m, int32_t on);
+void orb_modloader_play(OrbModloader *m);
+void orb_modloader_stop(OrbModloader *m);
+void orb_modloader_wind(OrbModloader *m, int32_t forward);
+void orb_modloader_bar_step(OrbModloader *m, int32_t up);
+void orb_modloader_loop_start_step(OrbModloader *m, int32_t delta_bars);
+void orb_modloader_loop_length_step(OrbModloader *m, int32_t delta_bars);
+void orb_modloader_set_loop_on(OrbModloader *m, int32_t on);
+void orb_modloader_set_record(OrbModloader *m, int32_t on);
+void orb_modloader_init_from_pattern(OrbModloader *m, int32_t loop_only);
+void orb_modloader_set_tempo_bpm(OrbModloader *m, int32_t bpm);
+uint32_t orb_modloader_tempo_milli(OrbModloader *m);
+void orb_modloader_record_param(OrbModloader *m, int32_t machine, uint8_t ctrl, uint8_t value);
 
 #ifdef __cplusplus
 }

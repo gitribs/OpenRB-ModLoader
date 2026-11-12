@@ -65,6 +65,8 @@ public:
     /// Restore default parameters and empty patterns, as a newly created instance.
     void resetDevice();
 
+    /// Copy the engine's live 808/909/mixer panel onto the host parameters.
+    void applyLivePanelParams();
     /// Load a ReBirth 2.x `.rbs`: 808/909 knobs and all patterns. Returns false on error.
     bool loadSongFile (const juce::File& file, juce::String& error);
     /// Write a 4.2 `.rbs` with the current 808/909 knobs and patterns.

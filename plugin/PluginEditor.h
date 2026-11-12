@@ -90,6 +90,35 @@ private:
     bool isUp;
 };
 
+class FoldArrow final : public juce::Button
+{
+public:
+    FoldArrow();
+    void setOpen (bool shouldBeOpen);
+    bool isOpen() const noexcept { return open; }
+    void paintButton (juce::Graphics&, bool highlighted, bool down) override;
+    void mouseDown (const juce::MouseEvent&) override;
+    void mouseUp (const juce::MouseEvent&) override;
+
+private:
+    bool open = false;
+};
+
+class TransportButton final : public juce::Button
+{
+public:
+    enum class Kind { Play, Stop, Rewind, Forward, Record };
+    explicit TransportButton (Kind kind);
+    void setLit (bool shouldBeLit);
+    void paintButton (juce::Graphics&, bool highlighted, bool down) override;
+    void mouseDown (const juce::MouseEvent&) override;
+    void mouseUp (const juce::MouseEvent&) override;
+
+private:
+    Kind kind;
+    bool lit = false;
+};
+
 class HeaderIconButton final : public juce::Button
 {
 public:
@@ -195,6 +224,13 @@ private:
     void chooseSongSave();
     void applyOpenedSong (const juce::File&);
     void finishSongLoad();
+    void setSongOpen (bool open);
+    void setupTransport();
+    void applyTransportVisibility();
+    void refreshTransport();
+    void refreshSongKnobs();
+    void layoutTransport (juce::Rectangle<int> r);
+    void confirmInitFromPattern (bool loopOnly);
     void refreshFxBadges();
     void toggleEffectsRecall (int machine);
     void showEffectsRecall (int machine);
@@ -242,6 +278,7 @@ private:
         juce::Label stepsValue { {}, "16" };
         IncDecArrowButton stepsUp { true };
         IncDecArrowButton stepsDown { false };
+        FoldArrow songFold;
         juce::AudioProcessorValueTreeState::ButtonAttachment enableA;
         int shownBank = 0;
         PatternUi (juce::AudioProcessorValueTreeState& apvts, const juce::String& enableId)
@@ -307,6 +344,23 @@ private:
     std::unique_ptr<EffectsRecallPanel> effectsPanel;
     std::unique_ptr<juce::FileChooser> chooser;
     bool fileChooserOpen = false;
+    bool songOpen = false;
+    bool standaloneTransport = false;
+
+    TransportButton playBtn { TransportButton::Kind::Play };
+    TransportButton stopBtn { TransportButton::Kind::Stop };
+    TransportButton rewindBtn { TransportButton::Kind::Rewind };
+    TransportButton ffBtn { TransportButton::Kind::Forward };
+    TransportButton recBtn { TransportButton::Kind::Record };
+    ModToggleButton loopOn;
+    juce::Label barCaption, barValue, startCaption, startValue, lengthCaption, lengthValue;
+    juce::Label tempoCaption, tempoValue, loopCaption;
+    IncDecArrowButton barUp { true }, barDown { false };
+    IncDecArrowButton startUp { true }, startDown { false };
+    IncDecArrowButton lengthUp { true }, lengthDown { false };
+    IncDecArrowButton tempoUp { true }, tempoDown { false };
+    ModToggleButton modePattern { "PATTERN" };
+    ModToggleButton modeSong { "SONG" };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ModloaderEditor)
 };

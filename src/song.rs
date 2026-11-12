@@ -1,8 +1,9 @@
-//! Load and save ReBirth 2.x `.rbs` songs, keeping the TR-808, TR-909, and effect snapshot.
+//! Load and save ReBirth 2.x `.rbs` songs, keeping the TR-808, TR-909, GLOB, and song tracks.
 
 use crate::{Modloader, P808, P909, PATTERN_BYTES};
 use orb_engine::load;
-use orb_engine::song::{Delay, Distortion, DrumPattern, Pcf};
+use orb_engine::seq::Sequencer;
+use orb_engine::song::{self, Delay, Distortion, DrumPattern, Pcf, TICKS_PER_POS};
 use orb_engine::tb303;
 use orb_engine::tr808;
 use rbs::{self, DrumKind, PatternDrum};
@@ -37,6 +38,12 @@ pub struct SongInfo {
     pub delay_pan: u8,
     pub delay_send_808: u8,
     pub delay_send_909: u8,
+    pub song_mode: u8,
+    pub loop_on: u8,
+    pub reserved: [u8; 3],
+    pub tempo: u32,
+    pub loop_start: u32,
+    pub loop_end: u32,
 }
 
 impl Default for SongInfo {
@@ -68,6 +75,12 @@ impl Default for SongInfo {
             delay_pan: 0,
             delay_send_808: 0,
             delay_send_909: 0,
+            song_mode: 0,
+            loop_on: 0,
+            reserved: [0; 3],
+            tempo: crate::DEFAULT_TEMPO_MILLI,
+            loop_start: 0,
+            loop_end: 4 * song::TICKS_PER_BAR,
         }
     }
 }
@@ -128,9 +141,23 @@ fn patterns_from_bytes(buf: &[u8]) -> Vec<PatternDrum> {
         .collect()
 }
 
+pub fn seq_to_rbs_track(seq: &Sequencer, i: usize) -> rbs::Track {
+    let mut track = rbs::Track::default();
+    track.events = seq
+        .events(i)
+        .iter()
+        .map(|e| rbs::Event {
+            pos: (e.tick.max(0) as u32) / TICKS_PER_POS,
+            ctrl: e.ctrl,
+            value: e.value,
+        })
+        .collect();
+    track
+}
+
 impl Modloader {
-    /// Parse a ReBirth 2.x `.rbs` file, apply 808/909 patterns, and return panel values.
-    /// 303s, compressor, and song-mode tracks are ignored. Mixer 808/909 levels and the
+    /// Parse a ReBirth 2.x `.rbs` file, apply 808/909 patterns and song tracks, and return
+    /// panel values. 303s and compressor still do not sound. Mixer 808/909 levels and the
     /// Distortion / PCF / Delay snapshot are kept for recall. On failure, [`Self::status`]
     /// holds the reason and patterns are left unchanged.
     pub fn load_song(&mut self, data: &[u8]) -> Result<SongInfo, String> {
@@ -170,14 +197,21 @@ impl Modloader {
         info.delay_pan = param_byte(&song.delay.params, Delay::PAN);
         info.delay_send_808 = song.mixer.channels[2].delay_send;
         info.delay_send_909 = song.mixer.channels[3].delay_send;
+        info.song_mode = song.globals.song_mode;
+        info.loop_on = song.globals.loop_on;
+        info.tempo = song.globals.tempo;
+        info.loop_start = song.globals.loop_start;
+        info.loop_end = song.globals.loop_end;
+
+        self.install_song(&file, &song.tracks, &song.globals, &info);
         Ok(info)
     }
 
-    /// Write a 4.2 `.rbs` whose 808/909 match the current patterns and `info`. 303s are
-    /// default parameters and rest patterns. Distortion, PCF, Delay, and 808/909 mixer
-    /// routing come from `info` so a loaded song can round-trip its effect snapshot.
+    /// Write a 4.2 `.rbs` whose 808/909 match the current patterns and `info`. Tracks come
+    /// from the sequencer (including 303/fx events kept from the last load). Distortion, PCF,
+    /// Delay, and 808/909 mixer routing come from `info`.
     pub fn save_song(&self, info: &SongInfo) -> Result<Vec<u8>, String> {
-        let mut song = rbs::Song::empty();
+        let mut song = self.kept_song.clone().unwrap_or_else(rbs::Song::empty);
         let name = mod_name_of(info);
         if name.chars().count() > 64 {
             return Err("mod name is too long".into());
@@ -188,16 +222,26 @@ impl Modloader {
             name
         };
         song.glob.shuffle = info.shuffle;
-        song.glob.song_mode = 0;
+        song.glob.song_mode = info.song_mode;
+        song.glob.loop_on = info.loop_on;
+        song.glob.tempo = if info.tempo == 0 {
+            crate::DEFAULT_TEMPO_MILLI
+        } else {
+            info.tempo
+        };
+        song.glob.loop_start = info.loop_start;
+        song.glob.loop_end = info.loop_end.max(info.loop_start + song::TICKS_PER_BAR);
 
-        song.mixer.master = 100;
         song.mixer.pcf_id = info.pcf_id;
-        for ch in &mut song.mixer.channels {
-            ch.enabled = 1;
-            ch.level = 100;
-            ch.pan = 64;
-            ch.delay_send = 0;
-            ch.dist = 0;
+        if self.kept_song.is_none() {
+            song.mixer.master = 100;
+            for ch in &mut song.mixer.channels {
+                ch.enabled = 1;
+                ch.level = 100;
+                ch.pan = 64;
+                ch.delay_send = 0;
+                ch.dist = 0;
+            }
         }
         song.mixer.channels[2].level = info.mix808.min(127);
         song.mixer.channels[3].level = info.mix909.min(127);
@@ -233,9 +277,11 @@ impl Modloader {
             ],
         );
 
-        let tb = &tb303::DEFAULT_PARAMS[..9];
-        song.tb303[0].params.copy_from_slice(tb);
-        song.tb303[1].params.copy_from_slice(tb);
+        if song.tb303[0].params.iter().all(|&b| b == 0) {
+            let tb = &tb303::DEFAULT_PARAMS[..9];
+            song.tb303[0].params.copy_from_slice(tb);
+            song.tb303[1].params.copy_from_slice(tb);
+        }
 
         song.tr808.kind = DrumKind::Tr808;
         song.tr808.params = info.p808.to_vec();
@@ -243,6 +289,10 @@ impl Modloader {
         song.tr909.kind = DrumKind::Tr909;
         song.tr909.params = info.p909.to_vec();
         song.tr909.patterns = patterns_from_bytes(&self.tr909.patterns[..]);
+
+        for i in 0..9 {
+            song.tracks[i] = seq_to_rbs_track(&self.seq, i);
+        }
 
         song.write().map_err(|e| e.to_string())
     }

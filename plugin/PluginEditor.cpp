@@ -24,6 +24,9 @@ const juce::Colour kSlotA { 0xff1f1f24 };
 const juce::Colour kSlotB { 0xff2c2c32 };
 constexpr int kEditorW = 1040;
 constexpr int kEditorH = 640;
+constexpr int kTransportH = 56;
+constexpr int kEditorExpandedH = kEditorH + kTransportH;
+constexpr int kFoldSize = 20;
 constexpr int kKnobSize = 20;
 constexpr int kFlamKnob = 28;
 constexpr int kLabelH = 14;
@@ -351,6 +354,119 @@ void IncDecArrowButton::mouseDown (const juce::MouseEvent& e)
 }
 
 void IncDecArrowButton::mouseUp (const juce::MouseEvent& e)
+{
+    if (! e.mods.isPopupMenu())
+        juce::Button::mouseUp (e);
+}
+
+FoldArrow::FoldArrow() : juce::Button ({}) {}
+
+void FoldArrow::setOpen (bool shouldBeOpen)
+{
+    if (open == shouldBeOpen)
+        return;
+    open = shouldBeOpen;
+    repaint();
+}
+
+void FoldArrow::paintButton (juce::Graphics& g, bool highlighted, bool down)
+{
+    auto r = getLocalBounds().toFloat().reduced (0.5f);
+    g.setColour (kWell);
+    g.fillRoundedRectangle (r, 2.0f);
+    g.setColour (highlighted || down || open ? kAmber : kLine);
+    g.drawRoundedRectangle (r, 2.0f, 1.0f);
+
+    juce::Path p;
+    const auto c = r.getCentre();
+    constexpr float w = 5.0f;
+    constexpr float h = 3.6f;
+    if (open)
+        p.addTriangle (c.x, c.y - h, c.x + w, c.y + h * 0.55f, c.x - w, c.y + h * 0.55f);
+    else
+        p.addTriangle (c.x, c.y + h, c.x + w, c.y - h * 0.55f, c.x - w, c.y - h * 0.55f);
+
+    g.setColour (down || open ? kAmber : kText);
+    g.fillPath (p);
+}
+
+void FoldArrow::mouseDown (const juce::MouseEvent& e)
+{
+    if (! e.mods.isPopupMenu())
+        juce::Button::mouseDown (e);
+}
+
+void FoldArrow::mouseUp (const juce::MouseEvent& e)
+{
+    if (! e.mods.isPopupMenu())
+        juce::Button::mouseUp (e);
+}
+
+TransportButton::TransportButton (Kind k) : juce::Button ({}), kind (k)
+{
+    setClickingTogglesState (k == Kind::Record);
+}
+
+void TransportButton::setLit (bool shouldBeLit)
+{
+    if (lit == shouldBeLit)
+        return;
+    lit = shouldBeLit;
+    repaint();
+}
+
+void TransportButton::paintButton (juce::Graphics& g, bool highlighted, bool down)
+{
+    auto r = getLocalBounds().toFloat().reduced (0.5f);
+    g.setColour (kWell);
+    g.fillRoundedRectangle (r, 3.0f);
+    const bool on = down || lit || (kind == Kind::Record && getToggleState());
+    g.setColour (highlighted || on ? kAmber : kLine);
+    g.drawRoundedRectangle (r, 3.0f, 1.0f);
+
+    const auto c = r.getCentre();
+    g.setColour (on ? (kind == Kind::Record ? kRed : kAmber) : kText);
+    switch (kind)
+    {
+        case Kind::Play:
+        {
+            juce::Path p;
+            p.addTriangle (c.x - 5.0f, c.y - 7.0f, c.x - 5.0f, c.y + 7.0f, c.x + 8.0f, c.y);
+            g.fillPath (p);
+            break;
+        }
+        case Kind::Stop:
+            g.fillRect (c.x - 5.0f, c.y - 5.0f, 10.0f, 10.0f);
+            break;
+        case Kind::Rewind:
+        {
+            juce::Path p;
+            p.addTriangle (c.x + 1.0f, c.y - 6.0f, c.x + 1.0f, c.y + 6.0f, c.x - 8.0f, c.y);
+            p.addTriangle (c.x + 9.0f, c.y - 6.0f, c.x + 9.0f, c.y + 6.0f, c.x, c.y);
+            g.fillPath (p);
+            break;
+        }
+        case Kind::Forward:
+        {
+            juce::Path p;
+            p.addTriangle (c.x - 1.0f, c.y - 6.0f, c.x - 1.0f, c.y + 6.0f, c.x + 8.0f, c.y);
+            p.addTriangle (c.x - 9.0f, c.y - 6.0f, c.x - 9.0f, c.y + 6.0f, c.x, c.y);
+            g.fillPath (p);
+            break;
+        }
+        case Kind::Record:
+            g.fillEllipse (c.x - 6.0f, c.y - 6.0f, 12.0f, 12.0f);
+            break;
+    }
+}
+
+void TransportButton::mouseDown (const juce::MouseEvent& e)
+{
+    if (! e.mods.isPopupMenu())
+        juce::Button::mouseDown (e);
+}
+
+void TransportButton::mouseUp (const juce::MouseEvent& e)
 {
     if (! e.mods.isPopupMenu())
         juce::Button::mouseUp (e);
@@ -1412,7 +1528,9 @@ ModloaderEditor::ModloaderEditor (ModloaderProcessor& p)
       pat909 (p.apvts, ModloaderProcessor::p909Id (0))
 {
     setLookAndFeel (&lnf);
-    setSize (kEditorW, kEditorH);
+    setSize (kEditorW,
+             proc.wrapperType == juce::AudioProcessor::wrapperType_Standalone ? kEditorExpandedH
+                                                                              : kEditorH);
     setResizable (false, false);
 
     auto addLabel = [this] (juce::Label& l, const juce::String& t, juce::Colour c, float h)
@@ -1501,6 +1619,7 @@ ModloaderEditor::ModloaderEditor (ModloaderProcessor& p)
     setupPatternSection (1);
     setup808();
     setup909();
+    setupTransport();
     setupDisable (disable808, 0);
     setupDisable (disable909, 1);
     addAndMakeVisible (fx808);
@@ -1521,6 +1640,13 @@ ModloaderEditor::ModloaderEditor (ModloaderProcessor& p)
     refreshSplash();
     refreshSteps();
     refreshFxBadges();
+    if (auto* e = eng())
+    {
+        OrbModloaderTransport t {};
+        orb_modloader_transport (e, &t);
+        if (t.song_mode != 0)
+            setSongOpen (true);
+    }
     resized();
     startTimerHz (30);
 
@@ -1625,6 +1751,361 @@ void ModloaderEditor::setupPatternSection (int machine)
     addAndMakeVisible (ui.stepsDown);
     ui.stepsUp.onClick = [this, machine] { bumpLength (machine, 1); };
     ui.stepsDown.onClick = [this, machine] { bumpLength (machine, -1); };
+
+    if (machine == 1)
+    {
+        addAndMakeVisible (ui.songFold);
+        ui.songFold.setTooltip ("Song mode");
+        ui.songFold.onClick = [this] { setSongOpen (! songOpen); };
+    }
+}
+
+void ModloaderEditor::setupTransport()
+{
+    standaloneTransport = proc.wrapperType == juce::AudioProcessor::wrapperType_Standalone;
+
+    auto addCaption = [this] (juce::Label& l, const juce::String& t)
+    {
+        l.setText (t, juce::dontSendNotification);
+        l.setColour (juce::Label::textColourId, kMuted);
+        l.setFont (juce::FontOptions().withHeight (11.0f).withStyle ("Bold"));
+        l.setJustificationType (juce::Justification::centred);
+        l.setInterceptsMouseClicks (false, false);
+        addChildComponent (l);
+    };
+    auto addValue = [this] (juce::Label& l)
+    {
+        l.setColour (juce::Label::textColourId, kText);
+        l.setColour (juce::Label::backgroundColourId, kWell);
+        l.setColour (juce::Label::outlineColourId, kLine);
+        l.setJustificationType (juce::Justification::centred);
+        l.setFont (juce::FontOptions (13.0f, juce::Font::bold));
+        addChildComponent (l);
+    };
+
+    addChildComponent (playBtn);
+    addChildComponent (stopBtn);
+    addChildComponent (rewindBtn);
+    addChildComponent (ffBtn);
+    addChildComponent (recBtn);
+    playBtn.setTooltip ("Play");
+    stopBtn.setTooltip ("Stop");
+    rewindBtn.setTooltip ("Rewind 10 bars");
+    ffBtn.setTooltip ("Forward 10 bars");
+    recBtn.setTooltip ("Record");
+    playBtn.onClick = [this]
+    {
+        if (auto* e = eng())
+            orb_modloader_play (e);
+        refreshTransport();
+    };
+    stopBtn.onClick = [this]
+    {
+        if (auto* e = eng())
+            orb_modloader_stop (e);
+        refreshTransport();
+    };
+    rewindBtn.onClick = [this]
+    {
+        if (auto* e = eng())
+            orb_modloader_wind (e, 0);
+        refreshTransport();
+    };
+    ffBtn.onClick = [this]
+    {
+        if (auto* e = eng())
+            orb_modloader_wind (e, 1);
+        refreshTransport();
+    };
+    recBtn.onClick = [this]
+    {
+        if (auto* e = eng())
+            orb_modloader_set_record (e, recBtn.getToggleState() ? 1 : 0);
+        refreshTransport();
+    };
+
+    addCaption (barCaption, "BAR");
+    addCaption (startCaption, "START");
+    addCaption (lengthCaption, "LENGTH");
+    addCaption (tempoCaption, "TEMPO");
+    addCaption (loopCaption, "LOOP");
+    addValue (barValue);
+    addValue (startValue);
+    addValue (lengthValue);
+    addValue (tempoValue);
+
+    addChildComponent (barUp);
+    addChildComponent (barDown);
+    addChildComponent (startUp);
+    addChildComponent (startDown);
+    addChildComponent (lengthUp);
+    addChildComponent (lengthDown);
+    addChildComponent (tempoUp);
+    addChildComponent (tempoDown);
+    addChildComponent (loopOn);
+    loopOn.setClickingTogglesState (true);
+    loopOn.setButtonText ({});
+    loopOn.setColour (juce::ToggleButton::textColourId, kMuted);
+    loopOn.setTooltip ("Loop");
+
+    barUp.onClick = [this]
+    {
+        if (auto* e = eng())
+            orb_modloader_bar_step (e, 1);
+        refreshTransport();
+    };
+    barDown.onClick = [this]
+    {
+        if (auto* e = eng())
+            orb_modloader_bar_step (e, 0);
+        refreshTransport();
+    };
+    startUp.onClick = [this]
+    {
+        if (auto* e = eng())
+            orb_modloader_loop_start_step (e, 1);
+        refreshTransport();
+    };
+    startDown.onClick = [this]
+    {
+        if (auto* e = eng())
+            orb_modloader_loop_start_step (e, -1);
+        refreshTransport();
+    };
+    lengthUp.onClick = [this]
+    {
+        if (auto* e = eng())
+            orb_modloader_loop_length_step (e, 1);
+        refreshTransport();
+    };
+    lengthDown.onClick = [this]
+    {
+        if (auto* e = eng())
+            orb_modloader_loop_length_step (e, -1);
+        refreshTransport();
+    };
+    tempoUp.onClick = [this]
+    {
+        if (auto* e = eng())
+        {
+            OrbModloaderTransport t {};
+            orb_modloader_transport (e, &t);
+            orb_modloader_set_tempo_bpm (e, t.tempo_bpm + 1);
+        }
+        refreshTransport();
+    };
+    tempoDown.onClick = [this]
+    {
+        if (auto* e = eng())
+        {
+            OrbModloaderTransport t {};
+            orb_modloader_transport (e, &t);
+            orb_modloader_set_tempo_bpm (e, t.tempo_bpm - 1);
+        }
+        refreshTransport();
+    };
+    loopOn.onClick = [this]
+    {
+        if (auto* e = eng())
+            orb_modloader_set_loop_on (e, loopOn.getToggleState() ? 1 : 0);
+    };
+
+    auto setupMode = [this] (juce::ToggleButton& b, const char* name)
+    {
+        b.setButtonText (name);
+        b.setRadioGroupId (90);
+        b.setClickingTogglesState (true);
+        b.getProperties().set ("radio", true);
+        b.getProperties().set ("caption", true);
+        b.setColour (juce::ToggleButton::textColourId, kMuted);
+        addChildComponent (b);
+    };
+    setupMode (modePattern, "PATTERN");
+    setupMode (modeSong, "SONG");
+    modePattern.setTooltip ("Pattern mode");
+    modeSong.setTooltip ("Song mode");
+    modePattern.onClick = [this]
+    {
+        if (modePattern.getToggleState())
+            setSongOpen (false);
+    };
+    modeSong.onClick = [this]
+    {
+        if (modeSong.getToggleState())
+            setSongOpen (true);
+    };
+    modePattern.setToggleState (true, juce::dontSendNotification);
+
+    if (standaloneTransport)
+    {
+        setSize (kEditorW, kEditorExpandedH);
+        if (auto* e = eng())
+            orb_modloader_play (e);
+    }
+    applyTransportVisibility();
+}
+
+void ModloaderEditor::setSongOpen (bool open)
+{
+    if (songOpen == open)
+    {
+        pat909.songFold.setOpen (open);
+        modePattern.setToggleState (! open, juce::dontSendNotification);
+        modeSong.setToggleState (open, juce::dontSendNotification);
+        return;
+    }
+    songOpen = open;
+    pat909.songFold.setOpen (open);
+    modePattern.setToggleState (! open, juce::dontSendNotification);
+    modeSong.setToggleState (open, juce::dontSendNotification);
+    if (auto* e = eng())
+        orb_modloader_set_song_mode (e, open ? 1 : 0);
+
+    applyTransportVisibility();
+    if (! standaloneTransport)
+        setSize (kEditorW, open ? kEditorExpandedH : kEditorH);
+    refreshTransport();
+}
+
+void ModloaderEditor::applyTransportVisibility()
+{
+    const bool strip = standaloneTransport || songOpen;
+    const bool local = standaloneTransport;
+    playBtn.setVisible (strip && local);
+    stopBtn.setVisible (strip && local);
+    rewindBtn.setVisible (strip && local);
+    ffBtn.setVisible (strip && local);
+    recBtn.setVisible (strip);
+    recBtn.setEnabled (songOpen);
+    barCaption.setVisible (strip);
+    barValue.setVisible (strip);
+    barUp.setVisible (strip && local);
+    barDown.setVisible (strip && local);
+    barUp.setEnabled (songOpen);
+    barDown.setEnabled (songOpen);
+    rewindBtn.setEnabled (songOpen);
+    ffBtn.setEnabled (songOpen);
+    startCaption.setVisible (strip);
+    startValue.setVisible (strip);
+    startUp.setVisible (strip);
+    startDown.setVisible (strip);
+    startUp.setEnabled (songOpen);
+    startDown.setEnabled (songOpen);
+    lengthCaption.setVisible (strip);
+    lengthValue.setVisible (strip);
+    lengthUp.setVisible (strip);
+    lengthDown.setVisible (strip);
+    lengthUp.setEnabled (songOpen);
+    lengthDown.setEnabled (songOpen);
+    loopOn.setVisible (strip);
+    loopCaption.setVisible (strip);
+    loopOn.setEnabled (songOpen);
+    tempoCaption.setVisible (strip && local);
+    tempoValue.setVisible (strip && local);
+    tempoUp.setVisible (strip && local);
+    tempoDown.setVisible (strip && local);
+    modePattern.setVisible (standaloneTransport);
+    modeSong.setVisible (standaloneTransport);
+}
+
+void ModloaderEditor::refreshTransport()
+{
+    auto* e = eng();
+    if (e == nullptr || ! songOpen)
+        return;
+    OrbModloaderTransport t {};
+    orb_modloader_transport (e, &t);
+    playBtn.setLit (t.playing != 0);
+    recBtn.setToggleState (t.recording != 0, juce::dontSendNotification);
+    recBtn.setLit (t.recording != 0);
+    loopOn.setToggleState (t.loop_on != 0, juce::dontSendNotification);
+    barValue.setText (juce::String (t.bar), juce::dontSendNotification);
+    startValue.setText (juce::String (t.start), juce::dontSendNotification);
+    lengthValue.setText (juce::String (t.length), juce::dontSendNotification);
+    tempoValue.setText (juce::String (t.tempo_bpm), juce::dontSendNotification);
+}
+
+void ModloaderEditor::refreshSongKnobs()
+{
+    auto* e = eng();
+    if (e == nullptr || ! songOpen)
+        return;
+    OrbModloaderParams live {};
+    orb_modloader_live_params (e, &live);
+    auto setKnob = [] (juce::Slider& s, float v)
+    {
+        if (s.isMouseButtonDown())
+            return;
+        s.setValue ((double) v, juce::dontSendNotification);
+    };
+    for (int i = 2; i < ORB_MODLOADER_P808; ++i)
+    {
+        if (is808Switch (i))
+            continue;
+        setKnob (k808[(size_t) i], (float) live.p808[i]);
+    }
+    for (int i = 2; i < ORB_MODLOADER_P909; ++i)
+        setKnob (k909[(size_t) i], (float) live.p909[i]);
+    if (! vol808.isMouseButtonDown())
+        vol808.setValue ((double) live.mix808, juce::dontSendNotification);
+    if (! vol909.isMouseButtonDown())
+        vol909.setValue ((double) live.mix909, juce::dontSendNotification);
+}
+
+void ModloaderEditor::layoutTransport (juce::Rectangle<int> r)
+{
+    if (! songOpen && ! standaloneTransport)
+        return;
+    r = r.reduced (12, 8);
+    if (standaloneTransport)
+    {
+        auto mode = r.removeFromRight (88);
+        modePattern.setBounds (mode.removeFromTop (mode.getHeight() / 2).reduced (0, 1));
+        modeSong.setBounds (mode.reduced (0, 1));
+        r.removeFromRight (8);
+    }
+    auto placeBtn = [&r] (juce::Button& b)
+    {
+        b.setBounds (r.removeFromLeft (36).reduced (2, 4));
+    };
+    if (standaloneTransport)
+    {
+        placeBtn (playBtn);
+        placeBtn (stopBtn);
+        placeBtn (rewindBtn);
+        placeBtn (ffBtn);
+    }
+    placeBtn (recBtn);
+    r.removeFromLeft (16);
+
+    auto placeReadout = [&r] (juce::Label& caption, juce::Label& value,
+                              juce::Button* up, juce::Button* down)
+    {
+        auto col = r.removeFromLeft (up != nullptr ? 86 : 50);
+        caption.setBounds (col.removeFromTop (14));
+        auto row = col.removeFromTop (24);
+        if (up != nullptr && down != nullptr)
+        {
+            value.setBounds (row.removeFromLeft (42).reduced (1, 2));
+            up->setBounds (row.removeFromLeft (20).reduced (1));
+            down->setBounds (row.removeFromLeft (20).reduced (1));
+        }
+        else
+            value.setBounds (row.reduced (1, 2));
+        r.removeFromLeft (10);
+    };
+    if (standaloneTransport)
+        placeReadout (barCaption, barValue, &barUp, &barDown);
+    else
+        placeReadout (barCaption, barValue, nullptr, nullptr);
+    auto loopCol = r.removeFromLeft (44);
+    loopCaption.setBounds (loopCol.removeFromTop (14));
+    loopOn.setBounds (loopCol.removeFromTop (22).withSizeKeepingCentre (22, 22));
+    r.removeFromLeft (8);
+    placeReadout (startCaption, startValue, &startUp, &startDown);
+    placeReadout (lengthCaption, lengthValue, &lengthUp, &lengthDown);
+    if (standaloneTransport)
+        placeReadout (tempoCaption, tempoValue, &tempoUp, &tempoDown);
 }
 
 void ModloaderEditor::setup808()
@@ -1766,6 +2247,14 @@ void ModloaderEditor::bumpLength (int machine, int delta)
 
 uint8_t ModloaderEditor::currentPattern (int machine) const
 {
+    if (songOpen)
+        if (auto* e = const_cast<ModloaderEditor*> (this)->eng())
+        {
+            OrbModloaderParams live {};
+            orb_modloader_live_params (e, &live);
+            const int pat = machine == 0 ? live.p808[1] : live.p909[1];
+            return (uint8_t) juce::jlimit (0, 31, pat);
+        }
     const auto id = machine == 0 ? ModloaderProcessor::p808Id (1) : ModloaderProcessor::p909Id (1);
     if (auto* v = proc.apvts.getRawParameterValue (id))
         return (uint8_t) juce::jlimit (0, 31, juce::roundToInt (v->load()));
@@ -1833,6 +2322,8 @@ void ModloaderEditor::refreshPatternHeader()
     {
         auto& ui = machine == 0 ? pat808 : pat909;
         const auto pat = currentPattern (machine);
+        if (songOpen)
+            ui.shownBank = pat / 8;
         for (int i = 0; i < 4; ++i)
             ui.bank[i].setToggleState (i == ui.shownBank, juce::dontSendNotification);
         for (int i = 0; i < 8; ++i)
@@ -2154,6 +2645,12 @@ void ModloaderEditor::finishSongLoad()
     refreshDisable();
     sync808Radios();
     refreshFxBadges();
+    if (auto* e = eng())
+    {
+        OrbModloaderTransport t {};
+        orb_modloader_transport (e, &t);
+        setSongOpen (t.song_mode != 0);
+    }
     if (statusNeedsDat())
         showSettings (true);
 }
@@ -2501,6 +2998,7 @@ void ModloaderEditor::resetDevice()
 {
     proc.resetDevice();
     flamEntry.setToggleState (false, juce::dontSendNotification);
+    setSongOpen (false);
     pat808.shownBank = 0;
     pat909.shownBank = 0;
     select808 (1);
@@ -2608,6 +3106,41 @@ void ModloaderEditor::editRandomize (bool drumOnly)
     storeFocusedPattern (pat);
 }
 
+void ModloaderEditor::confirmInitFromPattern (bool loopOnly)
+{
+    const auto heading = loopOnly ? juce::String ("Initialize Loop from Pattern Mode")
+                                  : juce::String ("Initialize Song from Pattern Mode");
+    const auto body = loopOnly
+        ? juce::String ("This replaces the current loop with the pattern-mode state and clears "
+                        "pattern-change and automation events inside that loop. The rest of the "
+                        "song is kept. This cannot be undone.")
+        : juce::String ("This replaces the entire song arrangement and automation with the "
+                        "pattern-mode state. Existing song events are discarded. This cannot be undone.");
+
+    juce::AlertWindow::showAsync (
+        juce::MessageBoxOptions()
+            .withIconType (juce::MessageBoxIconType::WarningIcon)
+            .withTitle (heading)
+            .withMessage (body)
+            .withButton ("Initialize")
+            .withButton ("Cancel")
+            .withAssociatedComponent (this),
+        [safe = juce::Component::SafePointer<ModloaderEditor> (this), loopOnly] (int result)
+        {
+            // Two-button JUCE AlertWindow: Initialize is 1, Cancel is 0.
+            if (safe == nullptr || result != 1)
+                return;
+            if (auto* e = safe->eng())
+                orb_modloader_init_from_pattern (e, loopOnly ? 1 : 0);
+            safe->proc.applyLivePanelParams();
+            safe->refreshSongKnobs();
+            safe->refreshTransport();
+            safe->refreshPatternHeader();
+            safe->refreshSteps();
+            safe->sync808Radios();
+        });
+}
+
 void ModloaderEditor::editAlter (bool drumOnly)
 {
     uint8_t pat[kPatLen];
@@ -2657,6 +3190,11 @@ void ModloaderEditor::showContextMenu()
     edit.addItem ("Randomize Drum", haveFocus, false, [this] { editRandomize (true); });
     edit.addItem ("Alter Pattern", haveFocus, false, [this] { editAlter (false); });
     edit.addItem ("Alter Drum", haveFocus, false, [this] { editAlter (true); });
+    edit.addSeparator();
+    edit.addItem ("Initialize Song from Pattern Mode", songOpen, false,
+                  [this] { confirmInitFromPattern (false); });
+    edit.addItem ("Initialize Loop from Pattern Mode", songOpen, false,
+                  [this] { confirmInitFromPattern (true); });
 
     juce::PopupMenu menu;
     menu.setLookAndFeel (&lnf);
@@ -2675,6 +3213,8 @@ void ModloaderEditor::timerCallback()
     sync808Radios();
     refreshModLabel();
     refreshFxBadges();
+    refreshTransport();
+    refreshSongKnobs();
     if (auto* e = eng())
         if (orb_modloader_current_mod (e) != splashMod)
             refreshSplash();
@@ -2763,6 +3303,8 @@ void ModloaderEditor::paint (juce::Graphics& g)
     drawPanel ({ 8, 8, kEditorW - 16, 48 });
     drawPanel (kMachine808);
     drawPanel (kMachine909);
+    if (songOpen || standaloneTransport)
+        drawPanel ({ 8, kEditorH, kEditorW - 16, kTransportH - 8 });
 
     auto paintEdgeBar = [&] (juce::Rectangle<int> machine, bool left, juce::Colour colour)
     {
@@ -2874,7 +3416,7 @@ void ModloaderEditor::resized()
     runN.setBounds (top.removeFromRight (runLabelW).withSizeKeepingCentre (runLabelW, 14));
     status.setBounds (top.withY (bandY).withHeight (bandH));
 
-    auto placePattern = [this] (PatternUi& ui, juce::Rectangle<int> r, bool withFlam, bool withSplash)
+    auto placePattern = [this] (PatternUi& ui, juce::Rectangle<int> r, bool withFlam, bool withSplash, bool withFold)
     {
         constexpr int gap = 2;
         auto grid = r.removeFromTop (56);
@@ -2914,11 +3456,16 @@ void ModloaderEditor::resized()
                                     .withSizeKeepingCentre (kFlamKnob, kFlamKnob));
             bottom.removeFromTop (6);
         }
-        ui.stepsLabel.setBounds (bottom.removeFromTop (14));
+        constexpr int cluster = 34 + 22 + 22;
+        auto labelRow = bottom.removeFromTop (14);
+        ui.stepsLabel.setBounds (withFold ? labelRow.removeFromRight (cluster) : labelRow);
         auto row = bottom.removeFromTop (24);
-        ui.stepsValue.setBounds (row.removeFromLeft (34).reduced (1, 2));
-        ui.stepsUp.setBounds (row.removeFromLeft (22).reduced (1));
-        ui.stepsDown.setBounds (row.removeFromLeft (22).reduced (1));
+        if (withFold)
+            ui.songFold.setBounds (row.removeFromLeft (kFoldSize).withSizeKeepingCentre (kFoldSize, kFoldSize));
+        auto steps = row.removeFromRight (cluster);
+        ui.stepsValue.setBounds (steps.removeFromLeft (34).reduced (1, 2));
+        ui.stepsUp.setBounds (steps.removeFromLeft (22).reduced (1));
+        ui.stepsDown.setBounds (steps.removeFromLeft (22).reduced (1));
     };
 
     const int machineRight = kEditorW - 16;
@@ -2928,8 +3475,10 @@ void ModloaderEditor::resized()
     constexpr int leftColW = 118;
     pat808.enable.setBounds (leftColX, 72, toggleContentWidth (pat808.enable, enableH), enableH);
     pat909.enable.setBounds (leftColX, 350, toggleContentWidth (pat909.enable, enableH), enableH);
-    placePattern (pat808, { leftColX, 72 + enableH + enableGap, leftColW, 322 - (72 + enableH + enableGap) }, false, true);
-    placePattern (pat909, { leftColX, 350 + enableH + enableGap, leftColW, 620 - (350 + enableH + enableGap) }, true, false);
+    placePattern (pat808, { leftColX, 72 + enableH + enableGap, leftColW, 322 - (72 + enableH + enableGap) }, false, true, false);
+    placePattern (pat909, { leftColX, 350 + enableH + enableGap, leftColW, 620 - (350 + enableH + enableGap) }, true, false, true);
+
+    layoutTransport ({ 8, kEditorH, kEditorW - 16, kTransportH });
 
     const int y808 = 76;
     const int y909 = 358;

@@ -899,6 +899,30 @@ impl Sequencer {
         self.last_tick = p;
     }
 
+    /// Keep the song clock on host position `pos`. Rewinds and jumps of a beat or more locate
+    /// (full chase). A rewind while recording commits the take first, like the song-loop wrap.
+    /// Tiny backward slips are ignored so host-buffer jitter does not re-chase tick-0 TRAKs.
+    pub fn follow_host(&mut self, pos: f64, devices: &mut Devices) {
+        let p = trunc(pos).max(0);
+        let cur = self.tick_pos();
+        let jump = BAR / 4;
+        if cur - p >= jump || p - cur >= jump {
+            if self.globals.byte2 != 0 && p < cur {
+                self.merge_all(self.merge_tick());
+            }
+            self.locate(p, devices);
+            return;
+        }
+        if p < cur {
+            return;
+        }
+        self.pos = pos.max(0.0);
+        if p > self.last_tick {
+            self.advance_all(p, devices);
+            self.last_tick = p;
+        }
+    }
+
     /// `sub_100218A0`: when playing, clear the play flag and stop every device (slot 4); prune
     /// every track; in song mode chase every track to the current tick.
     pub fn halt(&mut self, devices: &mut Devices) {
@@ -957,13 +981,21 @@ impl Sequencer {
     /// (0x10021294); then the byte is stored as it is.
     pub fn set_record(&mut self, v: u8, devices: &mut Devices) {
         if self.globals.byte2 != 0 && v == 0 {
-            let t = self.tick_pos();
+            let t = self.merge_tick();
             self.merge_all(t);
             if self.song_mode() {
-                self.chase_all(t, devices);
+                self.chase_all(self.tick_pos(), devices);
             }
         }
         self.globals.byte2 = v;
+    }
+
+    fn merge_tick(&self) -> i32 {
+        let rec = (0..TRACKS)
+            .filter_map(|i| self.recorded(i).iter().map(|e| e.tick).max())
+            .max()
+            .unwrap_or(0);
+        self.tick_pos().max(rec)
     }
 
     /// The nodes this song's pool has free (the module doc).

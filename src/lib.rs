@@ -5,26 +5,31 @@
 //! 64-sample latency. The C API takes (and returns) buffers already at 44100 Hz; resampling
 //! is the JUCE plugin's job.
 //!
-//! The clock is ReBirth's song position, the same Follow / FreeRun / Hold split as OpenRB PCF.
-//! Pattern mode only: the selected pattern loops. Shuffle uses the global knob when that
-//! pattern's shuffle flag is on.
+//! The clock is ReBirth's song position. Pattern mode follows the host playhead and loops the
+//! selected pattern. Song mode uses [`Sequencer`]: pattern chaining, loop, record. In a plugin
+//! the host drives play, stop, and position; standalone keeps its own transport. Shuffle uses
+//! the global knob when that pattern's shuffle flag is on.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::ptr::NonNull;
 use std::sync::Arc;
 
+mod fwd;
 mod iso;
 mod song;
 
-use orb_engine::frame::{BLOCK, Block, ChannelDevice, GUARD, SongDevice};
+use fwd::{Fwd808, Fwd909};
+use orb_engine::frame::{BLOCK, Block, ChannelDevice, Devices, GUARD, SongDevice};
 use orb_engine::process::ProcessState;
 use orb_engine::samples::{Retired, SampleSet};
-use orb_engine::seq::{self, TEMPO_STEP};
-use orb_engine::song::PPQ;
+use orb_engine::seq::{self, Sequencer, TEMPO_STEP};
+use orb_engine::song::{self as orbsong, Device, PPQ};
 use orb_engine::tables;
 use orb_engine::{tr808, tr909};
 use rbm::{KeyTable, Rbm, RbmError, standard};
+use rbs;
 use song::SongInfo;
 
 /// Engine (and original) sample rate.
@@ -41,6 +46,15 @@ pub const P909: usize = 30;
 pub const PATTERN_BYTES: usize = tr808::PATTERNS * tr808::PATTERN_LEN;
 /// Default ReBirth Mods folder on macOS.
 pub const DEFAULT_MODS_DIR: &str = "/Library/Application Support/Propellerhead/Rebirth RB-338/Mods";
+/// Mixer controller for the 808 channel level (`5 + 6*2 + 1`).
+const MIX_808_LEVEL: u8 = 18;
+/// Mixer controller for the 909 channel level (`5 + 6*3 + 1`).
+const MIX_909_LEVEL: u8 = 24;
+/// Ticks per bar.
+const BAR: i32 = orbsong::TICKS_PER_BAR as i32;
+/// Start of bar 999.
+const MAX_POS: i32 = 766_464;
+const MAX_END: i32 = 767_232;
 
 const STANDARD_NAME: &str = standard::NAME;
 
@@ -89,6 +103,8 @@ pub struct Playhead {
     pub bpm: f64,
     pub ppq: f64,
     pub playing: bool,
+    /// Plugin hosts set this so song mode follows play, stop, and locate. Standalone leaves it off.
+    pub host_driven: bool,
 }
 
 /// C layout of [`Playhead`]: `playing` is a 32-bit flag, not a Rust `bool`.
@@ -98,6 +114,7 @@ pub struct PlayheadC {
     pub bpm: f64,
     pub ppq: f64,
     pub playing: i32,
+    pub host_driven: i32,
 }
 
 impl From<PlayheadC> for Playhead {
@@ -106,8 +123,24 @@ impl From<PlayheadC> for Playhead {
             bpm: p.bpm,
             ppq: p.ppq,
             playing: p.playing != 0,
+            host_driven: p.host_driven != 0,
         }
     }
+}
+
+/// Song-mode transport snapshot for the panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(C)]
+pub struct Transport {
+    pub song_mode: i32,
+    pub playing: i32,
+    pub recording: i32,
+    pub loop_on: i32,
+    pub bar: i32,
+    pub start: i32,
+    pub length: i32,
+    pub tempo_bpm: i32,
+    pub tick: i32,
 }
 
 impl Default for Playhead {
@@ -116,6 +149,7 @@ impl Default for Playhead {
             bpm: 120.0,
             ppq: 0.0,
             playing: false,
+            host_driven: false,
         }
     }
 }
@@ -325,6 +359,11 @@ fn load_kit(path: &Path, dat: Option<&Path>, mods_dir: &Path) -> Result<LoadedKi
 pub struct Modloader {
     tr808: tr808::Tr808,
     tr909: tr909::Tr909,
+    seq: Sequencer,
+    devices: Devices,
+    bound_at: usize,
+    last_params: Params,
+    kept_song: Option<rbs::Song>,
     retired: Option<Retired>,
     work_main: Block,
     work_mix808: Block,
@@ -376,6 +415,11 @@ impl Modloader {
         let mut m = Self {
             tr808: tr808::Tr808::new(samples.clone(), process.clone()),
             tr909: tr909::Tr909::new(samples, process),
+            seq: Sequencer::default(),
+            devices: Devices::placeholders(),
+            bound_at: 0,
+            last_params: Params::default(),
+            kept_song: None,
             retired: None,
             work_main: [0.0; BLOCK],
             work_mix808: [0.0; BLOCK],
@@ -405,6 +449,8 @@ impl Modloader {
             pending_midi: [(0, 0, 0); 32],
             pending_midi_n: 0,
         };
+        m.ensure_bound();
+        m.init_device_tracks();
         m.scan_dir();
         m
     }
@@ -458,7 +504,15 @@ impl Modloader {
     ) {
         let n = main_l.len().min(main_r.len());
         let tempo = tempo_milli(playhead.bpm);
-        let mode = self.begin_clock(playhead, n);
+        let song_mode = self.song_mode();
+        let host_song = song_mode && playhead.host_driven;
+        let mode = if host_song {
+            self.update_clock_mode(playhead, n)
+        } else if song_mode {
+            ClockMode::Hold
+        } else {
+            self.begin_clock(playhead, n)
+        };
         let mut i = 0;
         let mut k = 0usize;
 
@@ -478,11 +532,28 @@ impl Modloader {
             i += take;
 
             if self.fill == BLOCK {
-                let tick = self.take_tick(playhead, k, mode);
-                self.apply_params(params);
-                let shuffled = seq::shuffled(tick, params.shuffle);
-                self.tr808.step(tick, shuffled, tempo as i32);
-                self.tr909.step(tick, shuffled, tempo as i32);
+                self.ensure_bound();
+                let (tick, stepped) = if song_mode {
+                    self.seq.set_tempo(tempo);
+                    self.seq.set_shuffle(params.shuffle);
+                    self.apply_panel_song(&params);
+                    if host_song {
+                        self.drive_song_host(playhead, k, mode);
+                    } else if self.seq.globals.play != 0 {
+                        self.with_devices(|seq, dev| {
+                            seq.tick(dev);
+                        });
+                    }
+                    let playing = self.seq.globals.play != 0;
+                    (self.seq.tick_pos(), playing)
+                } else {
+                    let tick = self.take_tick(playhead, k, mode);
+                    self.apply_params(params);
+                    let shuffled = seq::shuffled(tick, params.shuffle);
+                    self.tr808.step(tick, shuffled, tempo as i32);
+                    self.tr909.step(tick, shuffled, tempo as i32);
+                    (tick, mode != ClockMode::Hold)
+                };
                 self.drain_midi();
 
                 let mut v808 = [[0.0f32; BLOCK]; tr808::VOICES];
@@ -498,8 +569,18 @@ impl Modloader {
                 self.tr808.process_mix(&mut mix808_sum, &mut v808, &d808);
                 self.tr909.process_mix(&mut mix909_sum, &mut v909, &d909);
 
-                let t808 = mixer_target(params.mix808, &self.mix_level);
-                let t909 = mixer_target(params.mix909, &self.mix_level);
+                let mix808_level = if song_mode {
+                    self.devices.mixer.live.channels[2].level
+                } else {
+                    params.mix808
+                };
+                let mix909_level = if song_mode {
+                    self.devices.mixer.live.channels[3].level
+                } else {
+                    params.mix909
+                };
+                let t808 = mixer_target(mix808_level, &self.mix_level);
+                let t909 = mixer_target(mix909_level, &self.mix_level);
                 if !self.mix_primed {
                     self.gain_808 = t808;
                     self.gain_909 = t909;
@@ -535,7 +616,7 @@ impl Modloader {
                     self.work_aux = [[0.0; BLOCK]; AUX];
                 }
 
-                if mode != ClockMode::Hold {
+                if stepped {
                     self.held_tick = tick;
                 }
                 self.last_tick = Some(tick);
@@ -550,7 +631,7 @@ impl Modloader {
         }
     }
 
-    fn begin_clock(&mut self, playhead: Playhead, n: usize) -> ClockMode {
+    fn update_clock_mode(&mut self, playhead: Playhead, n: usize) -> ClockMode {
         if n == 0 || !playhead.playing {
             self.was_playing = false;
             return ClockMode::Hold;
@@ -568,16 +649,67 @@ impl Modloader {
         } else {
             ClockMode::Follow
         };
-        if !self.was_playing {
+        self.was_playing = true;
+        self.last_ppq = Some(playhead.ppq);
+        mode
+    }
+
+    fn begin_clock(&mut self, playhead: Playhead, n: usize) -> ClockMode {
+        let starting = n > 0 && playhead.playing && !self.was_playing;
+        let mode = self.update_clock_mode(playhead, n);
+        if starting {
             let tick = seq::trunc(host_pos(playhead.ppq, playhead.bpm, 0));
             self.tr808.start(tick);
             self.tr909.start(tick);
             self.tr808.relocate(tick, tick);
             self.tr909.relocate(tick, tick);
         }
-        self.was_playing = true;
-        self.last_ppq = Some(playhead.ppq);
         mode
+    }
+
+    fn drive_song_host(&mut self, playhead: Playhead, k: usize, mode: ClockMode) {
+        match mode {
+            ClockMode::Hold => {
+                if k != 0 {
+                    return;
+                }
+                self.with_devices(|seq, dev| {
+                    if seq.globals.byte2 != 0 {
+                        seq.set_record(0, dev);
+                    }
+                    if seq.globals.play != 0 {
+                        seq.halt(dev);
+                    }
+                    let pos = host_pos(playhead.ppq, playhead.bpm, 0).clamp(0.0, MAX_POS as f64);
+                    seq.follow_host(pos, dev);
+                });
+            }
+            ClockMode::Follow => {
+                let pos = host_pos(playhead.ppq, playhead.bpm, k).clamp(0.0, MAX_POS as f64);
+                self.with_devices(|seq, dev| {
+                    seq.follow_host(pos, dev);
+                    seq.play(dev);
+                    let t = seq.tick_pos();
+                    let sp = seq::shuffled(t, seq.globals.shuffle);
+                    let tempo = seq.globals.tempo as i32;
+                    dev.for_each(|d| d.step(t, sp, tempo));
+                });
+            }
+            ClockMode::FreeRun => {
+                let inc = block_inc(playhead.bpm);
+                self.with_devices(|seq, dev| {
+                    if seq.globals.play == 0 {
+                        seq.play(dev);
+                    }
+                    let pos = (seq.pos + inc).clamp(0.0, MAX_POS as f64);
+                    seq.follow_host(pos, dev);
+                    let t = seq.tick_pos();
+                    let sp = seq::shuffled(t, seq.globals.shuffle);
+                    let tempo = seq.globals.tempo as i32;
+                    dev.for_each(|d| d.step(t, sp, tempo));
+                });
+            }
+        }
     }
 
     fn take_tick(&mut self, playhead: Playhead, k: usize, mode: ClockMode) -> i32 {
@@ -600,6 +732,426 @@ impl Modloader {
         }
         for (i, &v) in p.p909.iter().enumerate() {
             self.tr909.set_param(i as u8, v);
+        }
+        self.last_params.p808 = p.p808;
+        self.last_params.p909 = p.p909;
+        self.last_params.mix808 = p.mix808;
+        self.last_params.mix909 = p.mix909;
+        self.last_params.shuffle = p.shuffle;
+    }
+
+    fn apply_panel_song(&mut self, p: &Params) {
+        for i in 0..P808 {
+            if p.p808[i] != self.last_params.p808[i] {
+                self.tr808.set_param(i as u8, p.p808[i]);
+                self.seq.record_hook(Device::Tr808, i as u8, p.p808[i]);
+            }
+        }
+        for i in 0..P909 {
+            if p.p909[i] != self.last_params.p909[i] {
+                self.tr909.set_param(i as u8, p.p909[i]);
+                self.seq.record_hook(Device::Tr909, i as u8, p.p909[i]);
+            }
+        }
+        if p.mix808 != self.last_params.mix808 {
+            self.devices.mixer.set_param(MIX_808_LEVEL, p.mix808);
+            self.seq.record_hook(Device::Mixer, MIX_808_LEVEL, p.mix808);
+        }
+        if p.mix909 != self.last_params.mix909 {
+            self.devices.mixer.set_param(MIX_909_LEVEL, p.mix909);
+            self.seq.record_hook(Device::Mixer, MIX_909_LEVEL, p.mix909);
+        }
+        self.last_params.p808 = p.p808;
+        self.last_params.p909 = p.p909;
+        self.last_params.mix808 = p.mix808;
+        self.last_params.mix909 = p.mix909;
+        self.last_params.shuffle = p.shuffle;
+    }
+
+    fn rbs_909_live(&self) -> [u8; P909] {
+        let mut p = [0u8; P909];
+        for c in 0..P909 {
+            p[c] = self.tr909.live[tr909::internal_index(c)];
+        }
+        p
+    }
+
+    pub fn live_params(&self) -> Params {
+        let mut p = Params::default();
+        p.p808.copy_from_slice(&self.tr808.live[..P808]);
+        p.p909 = self.rbs_909_live();
+        p.shuffle = self.seq.globals.shuffle;
+        p.mix808 = self.devices.mixer.live.channels[2].level;
+        p.mix909 = self.devices.mixer.live.channels[3].level;
+        p
+    }
+
+    pub fn song_mode(&self) -> bool {
+        self.seq.globals.song_mode != 0
+    }
+
+    fn ensure_bound(&mut self) {
+        let addr = std::ptr::from_ref(&self.tr808) as usize;
+        if self.bound_at == addr {
+            return;
+        }
+        let p808 = NonNull::from(&mut self.tr808);
+        let p909 = NonNull::from(&mut self.tr909);
+        self.devices.channels[2] = Box::new(Fwd808(p808));
+        self.devices.channels[3] = Box::new(Fwd909(p909));
+        self.bound_at = std::ptr::from_ref(&self.tr808) as usize;
+    }
+
+    fn with_devices<R>(&mut self, f: impl FnOnce(&mut Sequencer, &mut Devices) -> R) -> R {
+        self.ensure_bound();
+        f(&mut self.seq, &mut self.devices)
+    }
+
+    fn init_device_tracks(&mut self) {
+        self.ensure_bound();
+        SongDevice::init_track(&mut self.tr808, &mut self.seq.track_mut(Device::Tr808.id() as usize));
+        SongDevice::init_track(&mut self.tr909, &mut self.seq.track_mut(Device::Tr909.id() as usize));
+        SongDevice::init_track(
+            &mut self.devices.mixer,
+            &mut self.seq.track_mut(Device::Mixer.id() as usize),
+        );
+    }
+
+    fn install_song(
+        &mut self,
+        file: &rbs::Song,
+        tracks: &[Vec<orbsong::TrackEvent>; 9],
+        g: &orbsong::Globals,
+        info: &SongInfo,
+    ) {
+        self.kept_song = Some(file.clone());
+        self.seq = Sequencer::default();
+        self.bound_at = 0;
+        self.ensure_bound();
+        self.init_device_tracks();
+        for (i, evs) in tracks.iter().enumerate() {
+            if !evs.is_empty() {
+                let _ = self.seq.add_events(i, evs);
+            }
+        }
+        self.seq.globals.loop_on = g.loop_on;
+        self.seq.globals.tempo = if g.tempo == 0 {
+            DEFAULT_TEMPO_MILLI
+        } else {
+            g.tempo
+        };
+        self.seq.globals.loop_start = g.loop_start;
+        self.seq.globals.loop_end = g.loop_end.max(g.loop_start + orbsong::TICKS_PER_BAR);
+        self.seq.globals.shuffle = g.shuffle;
+        self.devices.mixer.live.channels[2].level = info.mix808;
+        self.devices.mixer.live.channels[3].level = info.mix909;
+        self.last_params.p808 = info.p808;
+        self.last_params.p909 = info.p909;
+        self.last_params.mix808 = info.mix808;
+        self.last_params.mix909 = info.mix909;
+        self.last_params.shuffle = info.shuffle;
+        let mode = g.song_mode;
+        self.with_devices(|seq, dev| {
+            seq.set_song_mode(mode, dev);
+            seq.locate(0, dev);
+        });
+        self.apply_params_live(&info.p808, &info.p909);
+    }
+
+    fn apply_params_live(&mut self, p808: &[u8; P808], p909: &[u8; P909]) {
+        if self.song_mode() {
+            return;
+        }
+        for (i, &v) in p808.iter().enumerate() {
+            self.tr808.set_param(i as u8, v);
+        }
+        for (i, &v) in p909.iter().enumerate() {
+            self.tr909.set_param(i as u8, v);
+        }
+    }
+
+    pub fn reset_song(&mut self) {
+        self.kept_song = None;
+        self.seq = Sequencer::default();
+        self.bound_at = 0;
+        self.ensure_bound();
+        self.init_device_tracks();
+        self.last_params = Params::default();
+        self.with_devices(|seq, dev| {
+            seq.set_song_mode(0, dev);
+            seq.locate(0, dev);
+        });
+    }
+
+    pub fn transport(&self) -> Transport {
+        let g = &self.seq.globals;
+        let tick = self.seq.tick_pos();
+        let start = g.loop_start as i32;
+        let end = g.loop_end as i32;
+        Transport {
+            song_mode: i32::from(g.song_mode != 0),
+            playing: i32::from(g.play != 0),
+            recording: i32::from(g.byte2 != 0),
+            loop_on: i32::from(g.loop_on != 0),
+            bar: tick / BAR + 1,
+            start: start / BAR + 1,
+            length: ((end - start) / BAR).max(1),
+            tempo_bpm: (g.tempo / 1000) as i32,
+            tick,
+        }
+    }
+
+    pub fn set_song_mode(&mut self, on: bool) {
+        let mode = u8::from(on);
+        if self.seq.globals.song_mode == mode {
+            if !on {
+                self.restart_clock();
+            }
+            return;
+        }
+        if !on {
+            self.with_devices(|seq, dev| {
+                seq.set_record(0, dev);
+                seq.set_song_mode(0, dev);
+            });
+            self.restart_clock();
+        } else {
+            self.with_devices(|seq, dev| {
+                seq.set_song_mode(1, dev);
+            });
+            // Next host callback Follows, so a DAW that was already playing locates and starts.
+            self.restart_clock();
+        }
+    }
+
+    pub fn play(&mut self) {
+        self.with_devices(|seq, dev| seq.play(dev));
+    }
+
+    pub fn stop(&mut self) {
+        self.with_devices(|seq, dev| {
+            seq.set_record(0, dev);
+            let song = seq.globals.song_mode != 0;
+            if seq.globals.play != 0 {
+                if song {
+                    seq.stop(dev);
+                } else {
+                    seq.halt(dev);
+                }
+            } else if song {
+                let pos = seq.tick_pos();
+                let start = seq.globals.loop_start as i32;
+                if start >= pos {
+                    seq.locate(0, dev);
+                } else {
+                    seq.locate(start, dev);
+                }
+            }
+        });
+    }
+
+    pub fn wind(&mut self, forward: bool) {
+        self.with_devices(|seq, dev| {
+            seq.set_record(0, dev);
+            let pos = seq.tick_pos();
+            let t = (if forward { 10 * BAR } else { -10 * BAR } + BAR * (pos / BAR)).clamp(0, MAX_POS);
+            seq.locate(t, dev);
+        });
+    }
+
+    pub fn bar_step(&mut self, up: bool) {
+        if !self.song_mode() {
+            return;
+        }
+        self.with_devices(|seq, dev| {
+            if !up {
+                seq.set_record(0, dev);
+            }
+            let pos = seq.tick_pos();
+            let t = (if up { BAR } else { -BAR } + BAR * (pos / BAR)).clamp(0, MAX_POS);
+            seq.locate(t, dev);
+        });
+    }
+
+    pub fn loop_start_step(&mut self, delta_bars: i32) {
+        if !self.song_mode() {
+            return;
+        }
+        let len = self.seq.globals.loop_end as i32 - self.seq.globals.loop_start as i32;
+        let start = BAR * ((self.seq.globals.loop_start as i32 + delta_bars * BAR).clamp(0, MAX_POS) / BAR);
+        let end = (len + start).clamp(start + BAR, MAX_POS);
+        self.seq.set_loop_start(start as u32);
+        self.seq.set_loop_end(end as u32);
+    }
+
+    pub fn loop_length_step(&mut self, delta_bars: i32) {
+        if !self.song_mode() {
+            return;
+        }
+        let start = self.seq.globals.loop_start as i32;
+        let hi = (MAX_END - start).max(BAR);
+        let len = BAR * ((self.seq.globals.loop_end as i32 - start + delta_bars * BAR).clamp(BAR, hi) / BAR);
+        self.seq.set_loop_end((start + len) as u32);
+    }
+
+    pub fn set_loop_on(&mut self, on: bool) {
+        self.seq.set_loop_on(u8::from(on));
+    }
+
+    pub fn set_record(&mut self, on: bool) {
+        if !self.song_mode() && on {
+            return;
+        }
+        self.with_devices(|seq, dev| seq.set_record(u8::from(on), dev));
+    }
+
+    /// Replace song tracks with the pattern-mode snapshot. `loop_only` limits that to
+    /// `[loop_start, loop_end)`.
+    pub fn init_from_pattern(&mut self, loop_only: bool) {
+        self.ensure_bound();
+        let start = if loop_only {
+            self.seq.globals.loop_start as i32
+        } else {
+            0
+        };
+        let end = self.seq.globals.loop_end as i32;
+        let keep = if loop_only {
+            self.events_outside(start, end)
+        } else {
+            std::array::from_fn(|_| Vec::new())
+        };
+        let g = self.seq.globals.clone();
+        let pos = self.seq.tick_pos();
+        let saved = self.seq.saved_tick;
+        let last_tick = self.seq.last_tick;
+        let playing = g.play != 0;
+
+        self.seq = Sequencer::default();
+        self.seq.globals = g;
+        self.seq.pos = pos as f64;
+        self.seq.last_tick = last_tick;
+        self.seq.saved_tick = saved;
+        self.bound_at = 0;
+        self.ensure_bound();
+
+        if loop_only {
+            for (i, evs) in keep.iter().enumerate() {
+                if !evs.is_empty() {
+                    let _ = self.seq.add_events(i, evs);
+                }
+            }
+            self.insert_pattern_at(start);
+        } else {
+            self.with_devices(|seq, dev| {
+                for d in Device::ALL {
+                    dev.device_mut(d)
+                        .init_track(&mut seq.track_mut(d.id() as usize));
+                }
+            });
+        }
+
+        self.with_devices(|seq, dev| {
+            seq.locate(pos, dev);
+            if playing {
+                seq.play(dev);
+            }
+        });
+        self.sync_last_params_from_live();
+    }
+
+    fn events_outside(&self, start: i32, end: i32) -> [Vec<orbsong::TrackEvent>; 9] {
+        std::array::from_fn(|i| {
+            self.seq.tracks[i]
+                .events(&self.seq.pool)
+                .iter()
+                .filter(|e| e.tick < start || e.tick >= end)
+                .map(|e| orbsong::TrackEvent {
+                    tick: e.tick.max(0) as u32,
+                    ctrl: e.ctrl,
+                    value: e.value,
+                })
+                .collect()
+        })
+    }
+
+    fn insert_pattern_at(&mut self, tick: i32) {
+        let p808 = self.tr808.params;
+        let p909 = self.tr909.params_rbs_order();
+        let mix = self.devices.mixer.pattern;
+        {
+            let mut tr = self.seq.track_mut(Device::Tr808.id() as usize);
+            tr.set_quant(tr808::ENABLED as u8, 32);
+            tr.set_quant(tr808::PATTERN as u8, 32);
+            for c in 0..=tr808::LAST_CTRL {
+                tr.insert(tick, c as u8, p808[c]);
+            }
+        }
+        {
+            let mut tr = self.seq.track_mut(Device::Tr909.id() as usize);
+            tr.set_quant(tr909::ENABLED as u8, 32);
+            tr.set_quant(tr909::PATTERN as u8, 32);
+            for (c, &v) in p909.iter().enumerate().take(tr909::LAST_CTRL + 1) {
+                tr.insert(tick, c as u8, v);
+            }
+        }
+        {
+            let mut tr = self.seq.track_mut(Device::Mixer.id() as usize);
+            tr.insert(tick, 1, mix.comp_id);
+            tr.insert(tick, 2, mix.pcf_id);
+            for (c, ch) in mix.channels.iter().enumerate() {
+                let base = 5 + 6 * c as u8;
+                tr.insert(tick, base + 1, ch.level);
+                tr.insert(tick, base + 2, ch.pan);
+                tr.insert(tick, base + 3, ch.send);
+                tr.insert(tick, base + 4, ch.dist);
+            }
+        }
+    }
+
+    fn sync_last_params_from_live(&mut self) {
+        self.last_params.p808.copy_from_slice(&self.tr808.live[..P808]);
+        self.last_params.p909 = self.rbs_909_live();
+        self.last_params.mix808 = self.devices.mixer.live.channels[2].level;
+        self.last_params.mix909 = self.devices.mixer.live.channels[3].level;
+        self.last_params.shuffle = self.seq.globals.shuffle;
+    }
+
+    pub fn set_tempo_bpm(&mut self, bpm: i32) {
+        let milli = (bpm.clamp(20, 500) as u32) * 1000;
+        self.seq.set_tempo(milli);
+    }
+
+    pub fn tempo_milli(&self) -> u32 {
+        if self.seq.globals.tempo == 0 {
+            DEFAULT_TEMPO_MILLI
+        } else {
+            self.seq.globals.tempo
+        }
+    }
+
+    pub fn record_param(&mut self, machine: i32, ctrl: u8, value: u8) {
+        let (dev, max) = match machine {
+            0 => (Device::Tr808, P808 as u8 - 1),
+            1 => (Device::Tr909, P909 as u8 - 1),
+            2 => (Device::Mixer, 27),
+            _ => return,
+        };
+        if ctrl > max {
+            return;
+        }
+        match machine {
+            0 => self.tr808.set_param(ctrl, value),
+            1 => self.tr909.set_param(ctrl, value),
+            2 => self.devices.mixer.set_param(ctrl, value),
+            _ => {}
+        }
+        self.seq.record_hook(dev, ctrl, value);
+        match (machine, ctrl) {
+            (0, c) if (c as usize) < P808 => self.last_params.p808[c as usize] = value,
+            (1, c) if (c as usize) < P909 => self.last_params.p909[c as usize] = value,
+            (2, MIX_808_LEVEL) => self.last_params.mix808 = value,
+            (2, MIX_909_LEVEL) => self.last_params.mix909 = value,
+            _ => {}
         }
     }
 
@@ -737,7 +1289,12 @@ impl Modloader {
     }
 
     pub fn last_step(&self, machine: i32) -> i32 {
-        if !self.was_playing {
+        let running = if self.song_mode() {
+            self.seq.globals.play != 0
+        } else {
+            self.was_playing
+        };
+        if !running {
             return -1;
         }
         match machine {
@@ -1265,6 +1822,137 @@ pub unsafe extern "C" fn orb_modloader_load_song(
         },
         0,
     )
+}
+
+/// # Safety
+/// `m` from [`orb_modloader_new`], or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn orb_modloader_reset_song(m: *mut Modloader) {
+    with_mut(m, |p| p.reset_song(), ());
+}
+
+/// # Safety
+/// `m` from [`orb_modloader_new`]. `out` is non-null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn orb_modloader_transport(m: *mut Modloader, out: *mut Transport) {
+    if out.is_null() {
+        return;
+    }
+    unsafe {
+        *out = with_ref(m, |p| p.transport(), Transport::default());
+    }
+}
+
+/// # Safety
+/// `m` from [`orb_modloader_new`]. `out` is non-null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn orb_modloader_live_params(m: *mut Modloader, out: *mut Params) {
+    if out.is_null() {
+        return;
+    }
+    unsafe {
+        *out = with_ref(m, |p| p.live_params(), Params::default());
+    }
+}
+
+/// # Safety
+/// `m` from [`orb_modloader_new`], or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn orb_modloader_set_song_mode(m: *mut Modloader, on: i32) {
+    with_mut(m, |p| p.set_song_mode(on != 0), ());
+}
+
+/// # Safety
+/// `m` from [`orb_modloader_new`], or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn orb_modloader_play(m: *mut Modloader) {
+    with_mut(m, |p| p.play(), ());
+}
+
+/// # Safety
+/// `m` from [`orb_modloader_new`], or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn orb_modloader_stop(m: *mut Modloader) {
+    with_mut(m, |p| p.stop(), ());
+}
+
+/// # Safety
+/// `m` from [`orb_modloader_new`], or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn orb_modloader_wind(m: *mut Modloader, forward: i32) {
+    with_mut(m, |p| p.wind(forward != 0), ());
+}
+
+/// # Safety
+/// `m` from [`orb_modloader_new`], or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn orb_modloader_bar_step(m: *mut Modloader, up: i32) {
+    with_mut(m, |p| p.bar_step(up != 0), ());
+}
+
+/// # Safety
+/// `m` from [`orb_modloader_new`], or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn orb_modloader_loop_start_step(m: *mut Modloader, delta_bars: i32) {
+    with_mut(m, |p| p.loop_start_step(delta_bars), ());
+}
+
+/// # Safety
+/// `m` from [`orb_modloader_new`], or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn orb_modloader_loop_length_step(m: *mut Modloader, delta_bars: i32) {
+    with_mut(m, |p| p.loop_length_step(delta_bars), ());
+}
+
+/// # Safety
+/// `m` from [`orb_modloader_new`], or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn orb_modloader_set_loop_on(m: *mut Modloader, on: i32) {
+    with_mut(m, |p| p.set_loop_on(on != 0), ());
+}
+
+/// # Safety
+/// `m` from [`orb_modloader_new`], or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn orb_modloader_set_record(m: *mut Modloader, on: i32) {
+    with_mut(m, |p| p.set_record(on != 0), ());
+}
+
+/// Copy pattern-mode state onto the song. `loop_only` 1 is the current loop; 0 is the whole song.
+///
+/// # Safety
+/// `m` from [`orb_modloader_new`], or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn orb_modloader_init_from_pattern(m: *mut Modloader, loop_only: i32) {
+    with_mut(m, |p| p.init_from_pattern(loop_only != 0), ());
+}
+
+/// # Safety
+/// `m` from [`orb_modloader_new`], or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn orb_modloader_set_tempo_bpm(m: *mut Modloader, bpm: i32) {
+    with_mut(m, |p| p.set_tempo_bpm(bpm), ());
+}
+
+/// # Safety
+/// `m` from [`orb_modloader_new`], or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn orb_modloader_tempo_milli(m: *mut Modloader) -> u32 {
+    with_ref(m, |p| p.tempo_milli(), DEFAULT_TEMPO_MILLI)
+}
+
+/// Record a panel change in song mode. `machine` is 0 808, 1 909, 2 mixer.
+///
+/// # Safety
+/// `m` from [`orb_modloader_new`], or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn orb_modloader_record_param(
+    m: *mut Modloader,
+    machine: i32,
+    ctrl: u8,
+    value: u8,
+) {
+    with_mut(m, |p| p.record_param(machine, ctrl, value), ());
 }
 
 /// Write a ReBirth 2.x `.rbs` from the current 808/909 patterns and `in`. If `buf` is null

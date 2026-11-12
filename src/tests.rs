@@ -52,6 +52,16 @@ fn playing(ppq: f64) -> Playhead {
         bpm: 120.0,
         ppq,
         playing: true,
+        host_driven: false,
+    }
+}
+
+fn host_playing(ppq: f64) -> Playhead {
+    Playhead {
+        bpm: 120.0,
+        ppq,
+        playing: true,
+        host_driven: true,
     }
 }
 
@@ -87,6 +97,16 @@ fn run(
 ) -> (Vec<f32>, Vec<Vec<f32>>) {
     let (left, _, _, aux) = run_all(m, params, playhead, n);
     (left, aux)
+}
+
+fn run_host(m: &mut Modloader, params: Params, start_ppq: f64, end_ppq: f64) {
+    const BUF: usize = 256;
+    let q = BUF as f64 / ENGINE_RATE * 120.0 / 60.0;
+    let mut ppq = start_ppq;
+    while ppq < end_ppq {
+        run(m, params, host_playing(ppq), BUF);
+        ppq += q;
+    }
 }
 
 fn energy(buf: &[f32]) -> f32 {
@@ -383,9 +403,14 @@ fn params_c_layout() {
 #[test]
 fn song_info_c_layout() {
     use crate::song::SongInfo;
-    assert_eq!(std::mem::size_of::<SongInfo>(), 147);
+    assert_eq!(std::mem::size_of::<SongInfo>(), 164);
     assert_eq!(std::mem::offset_of!(SongInfo, dist_enabled), 127);
     assert_eq!(std::mem::offset_of!(SongInfo, delay_send_909), 146);
+    assert_eq!(std::mem::offset_of!(SongInfo, song_mode), 147);
+    assert_eq!(std::mem::offset_of!(SongInfo, loop_on), 148);
+    assert_eq!(std::mem::offset_of!(SongInfo, tempo), 152);
+    assert_eq!(std::mem::offset_of!(SongInfo, loop_start), 156);
+    assert_eq!(std::mem::offset_of!(SongInfo, loop_end), 160);
 }
 
 /// Direct omits that instrument from the main sum; the aux bus still has it.
@@ -629,6 +654,294 @@ fn rbs_4_1_converts_808_tom_tune() {
     let mut m = Modloader::new();
     let info = m.load_song(&bytes).expect("load 4.1");
     assert_eq!(info.p808[10], 20 / 2 + 32);
+}
+
+/// Song-mode GLOB and 808 pattern-sequence events round-trip; pattern mode does not drop tracks.
+#[test]
+fn rbs_song_mode_tracks_roundtrip() {
+    use orb_engine::song::TICKS_PER_BAR;
+    let mut file = rbs::Song::empty();
+    file.glob.song_mode = 1;
+    file.glob.loop_on = 1;
+    file.glob.tempo = 140_000;
+    file.glob.loop_start = 0;
+    file.glob.loop_end = 8 * TICKS_PER_BAR;
+    file.tr808.params = crate::Params::default().p808.to_vec();
+    file.tracks[3].events = vec![
+        rbs::Event {
+            pos: 0,
+            ctrl: 1,
+            value: 0,
+        },
+        rbs::Event {
+            pos: 32,
+            ctrl: 1,
+            value: 3,
+        },
+    ];
+    let bytes = file.write().expect("write rbs");
+    let mut m = Modloader::new();
+    let info = m.load_song(&bytes).expect("load song mode");
+    assert_eq!(info.song_mode, 1);
+    assert_eq!(info.loop_on, 1);
+    assert_eq!(info.tempo, 140_000);
+    assert_eq!(info.loop_end, 8 * TICKS_PER_BAR);
+    assert!(m.song_mode());
+    m.bar_step(true);
+    assert_eq!(m.live_params().p808[1], 3);
+
+    m.set_song_mode(false);
+    assert!(!m.song_mode());
+    m.set_step(0, 0, 1, tr808::BD as u8, 1);
+    let mut out_info = info;
+    out_info.song_mode = 0;
+    let out = m.save_song(&out_info).expect("save after pattern edit");
+    let parsed = rbs::Song::parse(&out).expect("parse");
+    assert_eq!(parsed.glob.song_mode, 0);
+    assert!(
+        parsed.tracks[3]
+            .events
+            .iter()
+            .any(|e| e.ctrl == 1 && e.value == 3),
+        "pattern-mode save keeps the song sequence"
+    );
+    assert_eq!(m.get_step(0, 0, 1, tr808::BD as u8), 1);
+}
+
+/// Record in song mode writes a pattern-select event; grid edits do not.
+#[test]
+fn song_record_pattern_not_grid() {
+    let mut m = Modloader::new();
+    m.set_song_mode(true);
+    m.set_record(true);
+    m.record_param(0, 1, 5);
+    m.set_record(false);
+    m.set_step(0, 5, 0, tr808::BD as u8, 1);
+
+    let mut info = crate::song::SongInfo::default();
+    info.p808 = crate::Params::default().p808;
+    info.p909 = crate::Params::default().p909;
+    info.song_mode = 1;
+    let bytes = m.save_song(&info).expect("save recorded");
+    let parsed = rbs::Song::parse(&bytes).expect("parse");
+    assert!(
+        parsed.tracks[3]
+            .events
+            .iter()
+            .any(|e| e.ctrl == 1 && e.value == 5),
+        "pattern button is recorded"
+    );
+    assert!(
+        !parsed.tracks[3].events.iter().any(|e| e.ctrl > 1 && e.value == 1),
+        "step grid is not a TRAK event"
+    );
+    assert_eq!(m.get_step(0, 5, 0, tr808::BD as u8), 1);
+}
+
+/// Plugin song mode follows the host playhead: play, stop, and locate. Standalone transport stays independent.
+#[test]
+fn song_mode_follows_host_transport() {
+    let mut m = Modloader::new();
+    m.set_song_mode(true);
+    let params = Params::default();
+    assert_eq!(m.transport().playing, 0);
+
+    run(&mut m, params, host_playing(0.0), 256);
+    assert_eq!(m.transport().playing, 1);
+
+    let mut stopped = host_playing(0.0);
+    stopped.playing = false;
+    run(&mut m, params, stopped, 64);
+    assert_eq!(m.transport().playing, 0);
+
+    run(&mut m, params, host_playing(4.0), 64);
+    assert_eq!(m.transport().bar, 2);
+    assert_eq!(m.transport().playing, 1);
+}
+
+/// Host song mode must step the machines. Locate-only sync freezes LEDs and audio.
+#[test]
+fn song_mode_host_steps_with_playhead() {
+    let mut m = Modloader::new();
+    m.set_step(0, 0, 0, tr808::BD as u8, 1);
+    m.set_step(0, 0, 4, tr808::BD as u8, 1);
+    m.set_song_mode(true);
+    let params = Params::default();
+    const BUF: usize = 256;
+    let q = BUF as f64 / ENGINE_RATE * 120.0 / 60.0;
+    let mut ppq = 0.0;
+    let mut mix_energy = 0.0f32;
+    let mut max_step = -1;
+    for _ in 0..40 {
+        let (_, mix808, _, _) = run_all(&mut m, params, host_playing(ppq), BUF);
+        mix_energy += energy(&mix808);
+        max_step = max_step.max(m.last_step(0));
+        ppq += q;
+    }
+    assert!(
+        mix_energy > 0.0,
+        "808 mix is silent under host-driven song mode"
+    );
+    assert!(
+        max_step > 0,
+        "step LED never advanced under host-driven song mode, last {max_step}"
+    );
+}
+
+/// Host song mode must not re-chase tick-0 TRAKs every block, or panel edits snap back.
+#[test]
+fn song_mode_host_keeps_live_panel_edits() {
+    let mut m = Modloader::new();
+    let mut params = Params::default();
+    params.p808[tr808::BD_LEVEL] = 40;
+    run(&mut m, params, playing(0.0), 64);
+    m.set_song_mode(true);
+    m.init_from_pattern(false);
+    assert_eq!(m.live_params().p808[tr808::BD_LEVEL], 40);
+
+    m.record_param(0, tr808::BD_LEVEL as u8, 90);
+    params.p808[tr808::BD_LEVEL] = 90;
+    const BUF: usize = 256;
+    let q = BUF as f64 / ENGINE_RATE * 120.0 / 60.0;
+    let mut ppq = 0.0;
+    for _ in 0..20 {
+        run(&mut m, params, host_playing(ppq), BUF);
+        ppq += q;
+    }
+    assert_eq!(
+        m.live_params().p808[tr808::BD_LEVEL],
+        90,
+        "live panel edits must survive host-driven song playback"
+    );
+}
+
+/// Host stop turns record off and keeps quantized events even if the playhead has looped back.
+#[test]
+fn song_mode_host_stop_ends_record_and_keeps_take() {
+    let mut m = Modloader::new();
+    let mut params = Params::default();
+    run(&mut m, params, playing(0.0), 64);
+    m.set_song_mode(true);
+    m.init_from_pattern(false);
+    params = m.live_params();
+    m.set_record(true);
+
+    run_host(&mut m, params, 0.0, 4.0);
+    m.record_param(0, 1, 4);
+    params.p808[1] = 4;
+    run_host(&mut m, params, 4.0, 16.0);
+    run(&mut m, params, host_playing(0.0), 256);
+    assert_eq!(m.transport().recording, 1, "DAW loop keeps record armed");
+
+    let mut stopped = host_playing(0.0);
+    stopped.playing = false;
+    run(&mut m, params, stopped, 64);
+    assert_eq!(m.transport().recording, 0, "host stop turns record off");
+
+    let mut info = crate::song::SongInfo::default();
+    info.p808 = params.p808;
+    info.p909 = params.p909;
+    info.song_mode = 1;
+    let parsed = rbs::Song::parse(&m.save_song(&info).expect("save")).expect("parse");
+    assert!(
+        parsed.tracks[3]
+            .events
+            .iter()
+            .any(|e| e.ctrl == 1 && e.value == 4 && e.pos > 0),
+        "pattern change recorded after bar 1 is kept after the DAW loop and stop"
+    );
+
+    run_host(&mut m, params, 0.0, 2.0);
+    assert_eq!(m.live_params().p808[1], 0, "loop start plays the tick-0 pattern");
+    run_host(&mut m, params, 2.0, 10.0);
+    assert_eq!(
+        m.live_params().p808[1],
+        4,
+        "playback applies the recorded pattern change"
+    );
+
+    m.record_param(0, tr808::BD_LEVEL as u8, 77);
+    params.p808[tr808::BD_LEVEL] = 77;
+    run_host(&mut m, params, 10.0, 14.0);
+    assert_eq!(
+        m.live_params().p808[tr808::BD_LEVEL],
+        77,
+        "further panel edits still stick after a recorded take"
+    );
+}
+
+/// Initialize Song from Pattern Mode writes the pattern-mode snapshot at tick 0 and drops earlier TRAKs.
+#[test]
+fn init_song_from_pattern_replaces_tracks() {
+    let mut m = Modloader::new();
+    let mut params = Params::default();
+    params.p808[1] = 4;
+    run(&mut m, params, playing(0.0), 64);
+    m.set_song_mode(true);
+    m.set_record(true);
+    m.record_param(0, 1, 9);
+    m.set_record(false);
+    m.init_from_pattern(false);
+    assert_eq!(
+        m.live_params().p808[1],
+        4,
+        "live panel follows the pattern-mode snapshot"
+    );
+
+    let mut info = crate::song::SongInfo::default();
+    info.p808 = params.p808;
+    info.p909 = params.p909;
+    info.song_mode = 1;
+    let parsed = rbs::Song::parse(&m.save_song(&info).expect("save")).expect("parse");
+    assert!(
+        parsed.tracks[3]
+            .events
+            .iter()
+            .any(|e| e.ctrl == 1 && e.value == 4),
+        "pattern-mode pattern select is at the start of the song"
+    );
+    assert!(
+        !parsed.tracks[3]
+            .events
+            .iter()
+            .any(|e| e.ctrl == 1 && e.value == 9),
+        "recorded song events are discarded"
+    );
+}
+
+/// Initialize Loop from Pattern Mode leaves events outside the loop.
+#[test]
+fn init_loop_from_pattern_keeps_outside_events() {
+    use orb_engine::song::TICKS_PER_BAR;
+    let mut m = Modloader::new();
+    m.set_song_mode(true);
+    m.set_record(true);
+    m.record_param(0, 1, 2);
+    m.set_record(false);
+    m.loop_length_step(3);
+    m.loop_start_step(1);
+    m.init_from_pattern(true);
+
+    let mut info = crate::song::SongInfo::default();
+    info.p808 = crate::Params::default().p808;
+    info.p909 = crate::Params::default().p909;
+    info.song_mode = 1;
+    let parsed = rbs::Song::parse(&m.save_song(&info).expect("save")).expect("parse");
+    assert!(
+        parsed.tracks[3]
+            .events
+            .iter()
+            .any(|e| e.ctrl == 1 && e.value == 2 && e.pos == 0),
+        "events before the loop remain"
+    );
+    let loop_start_pos = (TICKS_PER_BAR / 24) as u32;
+    assert!(
+        parsed.tracks[3]
+            .events
+            .iter()
+            .any(|e| e.ctrl == 1 && e.pos == loop_start_pos),
+        "pattern-mode state is written at the loop start"
+    );
 }
 
 /// Garbage bytes are refused and leave patterns alone.
