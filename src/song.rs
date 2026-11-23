@@ -3,9 +3,10 @@
 use crate::{Modloader, P808, P909, PATTERN_BYTES};
 use orb_engine::load;
 use orb_engine::seq::Sequencer;
-use orb_engine::song::{self, Delay, Distortion, DrumPattern, Pcf, TICKS_PER_POS};
+use orb_engine::song::{self, Delay, Device, Distortion, DrumPattern, Pcf, TICKS_PER_POS};
 use orb_engine::tb303;
 use orb_engine::tr808;
+use orb_engine::tr909;
 use rbs::{self, DrumKind, PatternDrum};
 
 /// Panel state carried across the C boundary when a song is loaded or saved.
@@ -17,6 +18,8 @@ pub struct SongInfo {
     pub shuffle: u8,
     pub mix808: u8,
     pub mix909: u8,
+    pub mix808_pan: u8,
+    pub mix909_pan: u8,
     pub mod_name: [i8; 65],
     pub dist_enabled: u8,
     pub dist_amount: u8,
@@ -40,6 +43,7 @@ pub struct SongInfo {
     pub delay_send_909: u8,
     pub song_mode: u8,
     pub loop_on: u8,
+    /// bit 0: PCF was routed to the 808 on any TRAK; bit 1: to the 909.
     pub reserved: [u8; 3],
     pub tempo: u32,
     pub loop_start: u32,
@@ -54,6 +58,8 @@ impl Default for SongInfo {
             shuffle: 0,
             mix808: 100,
             mix909: 100,
+            mix808_pan: 64,
+            mix909_pan: 64,
             mod_name: [0; 65],
             dist_enabled: 0,
             dist_amount: 0,
@@ -107,6 +113,146 @@ fn mod_name_of(info: &SongInfo) -> String {
     let bytes = info.mod_name.map(|c| c as u8);
     let n = bytes.iter().position(|&c| c == 0).unwrap_or(bytes.len());
     String::from_utf8_lossy(&bytes[..n]).into_owned()
+}
+
+const MIX_PCF_ID: u8 = 2;
+const MIX_LEVEL_808: u8 = 18;
+const MIX_PAN_808: u8 = 19;
+const MIX_SEND_808: u8 = 20;
+const MIX_DIST_808: u8 = 21;
+const MIX_LEVEL_909: u8 = 24;
+const MIX_PAN_909: u8 = 25;
+const MIX_SEND_909: u8 = 26;
+const MIX_DIST_909: u8 = 27;
+
+fn last_at_tick0(events: &[song::TrackEvent], ctrl: u8) -> Option<u8> {
+    events
+        .iter()
+        .filter(|e| e.ctrl == ctrl && e.tick == 0)
+        .map(|e| e.value)
+        .last()
+}
+
+fn last_nonzero(events: &[song::TrackEvent], ctrl: u8) -> Option<u8> {
+    events
+        .iter()
+        .filter(|e| e.ctrl == ctrl && e.value != 0)
+        .map(|e| e.value)
+        .last()
+}
+
+fn overlay_u8(slot: &mut u8, events: &[song::TrackEvent], ctrl: u8) {
+    if let Some(v) = last_at_tick0(events, ctrl) {
+        *slot = v;
+    }
+}
+
+fn set_rbs_tick0(track: &mut rbs::Track, ctrl: u8, value: u8) {
+    if let Some(e) = track
+        .events
+        .iter_mut()
+        .rev()
+        .find(|e| e.pos == 0 && e.ctrl == ctrl)
+    {
+        e.value = value;
+        return;
+    }
+    track.events.push(rbs::Event {
+        pos: 0,
+        ctrl,
+        value,
+    });
+}
+
+fn any_nonzero(events: &[song::TrackEvent], ctrl: u8) -> bool {
+    events.iter().any(|e| e.ctrl == ctrl && e.value != 0)
+}
+
+fn any_eq(events: &[song::TrackEvent], ctrl: u8, value: u8) -> bool {
+    events.iter().any(|e| e.ctrl == ctrl && e.value == value)
+}
+
+/// MIXR / DIST / PCF / DELY chunks are the pattern copy (often the state when song mode was
+/// entered). Live start values and later routing live on TRAKs. Overlay tick 0 onto the
+/// snapshot so Copy matches bar 1, and keep routing that appears anywhere in the song.
+fn apply_fx_tracks(info: &mut SongInfo, tracks: &[Vec<song::TrackEvent>; 9]) {
+    let mix = &tracks[Device::Mixer.id() as usize];
+    let delay = &tracks[Device::Delay.id() as usize];
+    let dist = &tracks[Device::Distortion.id() as usize];
+    let pcf = &tracks[Device::Pcf.id() as usize];
+
+    overlay_u8(&mut info.dist_enabled, dist, 0);
+    overlay_u8(&mut info.dist_amount, dist, 1);
+    overlay_u8(&mut info.dist_shape, dist, 2);
+    overlay_u8(&mut info.pcf_enabled, pcf, 0);
+    overlay_u8(&mut info.pcf_frequency, pcf, 1);
+    overlay_u8(&mut info.pcf_resonance, pcf, 2);
+    overlay_u8(&mut info.pcf_amount, pcf, 3);
+    overlay_u8(&mut info.pcf_wave, pcf, 4);
+    overlay_u8(&mut info.pcf_decay, pcf, 5);
+    overlay_u8(&mut info.pcf_mode, pcf, 6);
+    overlay_u8(&mut info.delay_enabled, delay, 0);
+    overlay_u8(&mut info.delay_steps, delay, 1);
+    overlay_u8(&mut info.delay_mode, delay, 2);
+    overlay_u8(&mut info.delay_feedback, delay, 3);
+    overlay_u8(&mut info.delay_pan, delay, 4);
+    overlay_u8(&mut info.pcf_id, mix, MIX_PCF_ID);
+    if let Some(v) = last_at_tick0(mix, MIX_DIST_808) {
+        info.dist_808 = u8::from(v != 0);
+    }
+    if let Some(v) = last_at_tick0(mix, MIX_DIST_909) {
+        info.dist_909 = u8::from(v != 0);
+    }
+    overlay_u8(&mut info.delay_send_808, mix, MIX_SEND_808);
+    overlay_u8(&mut info.delay_send_909, mix, MIX_SEND_909);
+    overlay_u8(&mut info.mix808, mix, MIX_LEVEL_808);
+    overlay_u8(&mut info.mix909, mix, MIX_LEVEL_909);
+    overlay_u8(&mut info.mix808_pan, mix, MIX_PAN_808);
+    overlay_u8(&mut info.mix909_pan, mix, MIX_PAN_909);
+
+    if any_nonzero(dist, 0) {
+        info.dist_enabled = 1;
+    }
+    if any_nonzero(pcf, 0) {
+        info.pcf_enabled = 1;
+    }
+    if any_nonzero(delay, 0) {
+        info.delay_enabled = 1;
+    }
+    if any_nonzero(mix, MIX_DIST_808) {
+        info.dist_808 = 1;
+    }
+    if any_nonzero(mix, MIX_DIST_909) {
+        info.dist_909 = 1;
+    }
+    if info.delay_send_808 == 0 {
+        if let Some(v) = last_nonzero(mix, MIX_SEND_808) {
+            info.delay_send_808 = v;
+        }
+    }
+    if info.delay_send_909 == 0 {
+        if let Some(v) = last_nonzero(mix, MIX_SEND_909) {
+            info.delay_send_909 = v;
+        }
+    }
+
+    if info.pcf_id == 3 || any_eq(mix, MIX_PCF_ID, 3) {
+        info.reserved[0] |= 1;
+    }
+    if info.pcf_id == 4 || any_eq(mix, MIX_PCF_ID, 4) {
+        info.reserved[0] |= 2;
+    }
+}
+
+/// 808/909 chunks are the pattern-mode copy. Tick-0 TRAKs are the live start. Overlay
+/// Enable and Pattern so pattern mode matches bar 1 even when those never move later.
+fn apply_drum_tracks(info: &mut SongInfo, tracks: &[Vec<song::TrackEvent>; 9]) {
+    let t808 = &tracks[Device::Tr808.id() as usize];
+    let t909 = &tracks[Device::Tr909.id() as usize];
+    overlay_u8(&mut info.p808[tr808::ENABLED], t808, tr808::ENABLED as u8);
+    overlay_u8(&mut info.p808[tr808::PATTERN], t808, tr808::PATTERN as u8);
+    overlay_u8(&mut info.p909[tr909::ENABLED], t909, tr909::ENABLED as u8);
+    overlay_u8(&mut info.p909[tr909::PATTERN], t909, tr909::PATTERN as u8);
 }
 
 fn dump_patterns(pats: &[DrumPattern; 32]) -> [u8; PATTERN_BYTES] {
@@ -176,6 +322,8 @@ impl Modloader {
         info.shuffle = song.globals.shuffle;
         info.mix808 = song.mixer.channels[2].level;
         info.mix909 = song.mixer.channels[3].level;
+        info.mix808_pan = song.mixer.channels[2].pan;
+        info.mix909_pan = song.mixer.channels[3].pan;
         copy_mod_name(&song.mod_name, &mut info.mod_name);
         info.dist_enabled = param_byte(&song.dist.params, Distortion::ENABLED);
         info.dist_amount = param_byte(&song.dist.params, Distortion::AMOUNT);
@@ -202,6 +350,8 @@ impl Modloader {
         info.tempo = song.globals.tempo;
         info.loop_start = song.globals.loop_start;
         info.loop_end = song.globals.loop_end;
+        apply_fx_tracks(&mut info, &song.tracks);
+        apply_drum_tracks(&mut info, &song.tracks);
 
         self.install_song(&file, &song.tracks, &song.globals, &info);
         Ok(info)
@@ -245,6 +395,8 @@ impl Modloader {
         }
         song.mixer.channels[2].level = info.mix808.min(127);
         song.mixer.channels[3].level = info.mix909.min(127);
+        song.mixer.channels[2].pan = info.mix808_pan.min(127);
+        song.mixer.channels[3].pan = info.mix909_pan.min(127);
         song.mixer.channels[2].dist = u8::from(info.dist_808 != 0);
         song.mixer.channels[3].dist = u8::from(info.dist_909 != 0);
         song.mixer.channels[2].delay_send = info.delay_send_808.min(127);
@@ -293,6 +445,14 @@ impl Modloader {
         for i in 0..9 {
             song.tracks[i] = seq_to_rbs_track(&self.seq, i);
         }
+        let mix = &mut song.tracks[Device::Mixer.id() as usize];
+        set_rbs_tick0(mix, MIX_LEVEL_808, info.mix808.min(127));
+        set_rbs_tick0(mix, MIX_LEVEL_909, info.mix909.min(127));
+        set_rbs_tick0(mix, MIX_PAN_808, info.mix808_pan.min(127));
+        set_rbs_tick0(mix, MIX_PAN_909, info.mix909_pan.min(127));
+        set_rbs_tick0(mix, MIX_DIST_808, u8::from(info.dist_808 != 0));
+        set_rbs_tick0(mix, MIX_DIST_909, u8::from(info.dist_909 != 0));
+        set_rbs_tick0(mix, MIX_PCF_ID, info.pcf_id);
 
         song.write().map_err(|e| e.to_string())
     }

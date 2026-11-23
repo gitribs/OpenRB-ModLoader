@@ -113,17 +113,19 @@ bool is808Level (int ctrl)
 
 bool songDistOn (const OrbModloaderSong& s, int machine)
 {
-    return s.dist_enabled != 0 && (machine == 0 ? s.dist_808 : s.dist_909) != 0;
+    return (machine == 0 ? s.dist_808 : s.dist_909) != 0;
 }
 
 bool songPcfOn (const OrbModloaderSong& s, int machine)
 {
-    return s.pcf_enabled != 0 && s.pcf_id == (machine == 0 ? 3 : 4);
+    const uint8_t id = machine == 0 ? 3 : 4;
+    const uint8_t bit = machine == 0 ? 1 : 2;
+    return s.pcf_id == id || (s.reserved[0] & bit) != 0;
 }
 
 bool songDelayOn (const OrbModloaderSong& s, int machine)
 {
-    return s.delay_enabled != 0 && (machine == 0 ? s.delay_send_808 : s.delay_send_909) != 0;
+    return (machine == 0 ? s.delay_send_808 : s.delay_send_909) != 0;
 }
 
 uint8_t delaySendOf (const OrbModloaderSong& s, int machine)
@@ -131,16 +133,18 @@ uint8_t delaySendOf (const OrbModloaderSong& s, int machine)
     return machine == 0 ? s.delay_send_808 : s.delay_send_909;
 }
 
-juce::String distortRecallText (const OrbModloaderSong& s)
+juce::String distortRecallText (const OrbModloaderSong& s, int enabled)
 {
-    return "openrb-distort 1\namount: " + juce::String ((int) s.dist_amount)
+    return "openrb-distort 1\nenabled: " + juce::String (enabled)
+         + "\namount: " + juce::String ((int) s.dist_amount)
          + "\nshape: " + juce::String ((int) s.dist_shape) + "\n";
 }
 
-juce::String pcfRecallText (const OrbModloaderSong& s)
+juce::String pcfRecallText (const OrbModloaderSong& s, int enabled)
 {
     const int pattern = juce::jlimit (0, 54, (int) s.pcf_wave);
-    return "openrb-pcf 1\nfrequency: " + juce::String ((int) s.pcf_frequency)
+    return "openrb-pcf 1\nenabled: " + juce::String (enabled)
+         + "\nfrequency: " + juce::String ((int) s.pcf_frequency)
          + "\nresonance: " + juce::String ((int) s.pcf_resonance)
          + "\namount: " + juce::String ((int) s.pcf_amount)
          + "\ndecay: " + juce::String ((int) s.pcf_decay)
@@ -148,9 +152,10 @@ juce::String pcfRecallText (const OrbModloaderSong& s)
          + "\nmode: " + juce::String (s.pcf_mode == 1 ? "lp" : "bp") + "\n";
 }
 
-juce::String delayRecallText (const OrbModloaderSong& s, int machine)
+juce::String delayRecallText (const OrbModloaderSong& s, int machine, int enabled)
 {
-    return "openrb-delay 1\nmix: " + juce::String ((int) delaySendOf (s, machine))
+    return "openrb-delay 1\nenabled: " + juce::String (enabled)
+         + "\nmix: " + juce::String ((int) delaySendOf (s, machine))
          + "\nsteps: " + juce::String ((int) s.delay_steps)
          + "\nmode: " + juce::String (s.delay_mode == 0 ? "triplet" : "sixteenth")
          + "\nfeedback: " + juce::String ((int) s.delay_feedback)
@@ -322,6 +327,51 @@ void ModToggleButton::mouseUp (const juce::MouseEvent& e)
 {
     if (! e.mods.isPopupMenu())
         juce::ToggleButton::mouseUp (e);
+}
+
+MuteIconButton::MuteIconButton()
+{
+    setClickingTogglesState (true);
+    setTriggeredOnMouseDown (false);
+}
+
+void MuteIconButton::paintButton (juce::Graphics& g, bool highlighted, bool down)
+{
+    auto r = getLocalBounds().toFloat().reduced (2.5f);
+    const bool muted = getToggleState();
+    const bool lit = highlighted || down;
+    const auto colour = ! isEnabled() ? kMuted.withAlpha (0.45f)
+                                      : (lit ? kAmber : kText);
+    const auto c = r.getCentre();
+    const float bodyW = 3.6f;
+    const float bodyH = 5.2f;
+    const float cone = 5.2f;
+    const float bodyX = c.x - 7.0f;
+    auto body = juce::Rectangle<float> (bodyX, c.y - bodyH * 0.5f, bodyW, bodyH);
+    g.setColour (colour);
+    g.fillRoundedRectangle (body, 0.8f);
+
+    juce::Path speaker;
+    speaker.startNewSubPath (body.getRight() - 0.4f, c.y - bodyH * 0.42f);
+    speaker.lineTo (body.getRight() + cone, c.y - cone);
+    speaker.lineTo (body.getRight() + cone, c.y + cone);
+    speaker.lineTo (body.getRight() - 0.4f, c.y + bodyH * 0.42f);
+    speaker.closeSubPath();
+    g.fillPath (speaker);
+
+    if (muted)
+        return;
+
+    // Arcs clockwise from 12 o'clock; halfPi is 3 o'clock, so this opens to the right of the cone.
+    const float mouthX = body.getRight() + cone;
+    const float from = juce::MathConstants<float>::halfPi - 0.85f;
+    const float to = juce::MathConstants<float>::halfPi + 0.85f;
+    g.setColour (colour);
+    juce::Path nearWave, farWave;
+    nearWave.addCentredArc (mouthX, c.y, 4.2f, 4.2f, 0.0f, from, to, true);
+    farWave.addCentredArc (mouthX, c.y, 6.4f, 6.4f, 0.0f, from, to, true);
+    g.strokePath (nearWave, juce::PathStrokeType (1.1f));
+    g.strokePath (farWave, juce::PathStrokeType (1.1f));
 }
 
 IncDecArrowButton::IncDecArrowButton (bool up) : juce::Button ({}), isUp (up) {}
@@ -1056,16 +1106,32 @@ public:
             row.copy.setButtonText ("Copy");
             row.copy.setColour (juce::TextButton::buttonColourId, kWell);
             row.copy.getProperties().set ("headerBtn", true);
+            row.copy.setTooltip ("Also carries song automation for a later OpenRB Print paste");
             addAndMakeVisible (row.copy);
         };
         setupRow (dist, "Distortion");
         setupRow (pcf, "PCF");
         setupRow (delay, "Delay");
-        dist.copy.onClick = [this] { copyText (distortRecallText (owner.proc.songEffects())); };
-        pcf.copy.onClick = [this] { copyText (pcfRecallText (owner.proc.songEffects())); };
+        dist.copy.onClick = [this]
+        {
+            copyText (distortRecallText (owner.proc.songEffects(),
+                                        owner.proc.effectSnapshotEnable (
+                                            ModloaderProcessor::EffectPrintKind::Distortion, machine))
+                      + owner.proc.formatEffectPrint (ModloaderProcessor::EffectPrintKind::Distortion, machine));
+        };
+        pcf.copy.onClick = [this]
+        {
+            copyText (pcfRecallText (owner.proc.songEffects(),
+                                    owner.proc.effectSnapshotEnable (
+                                        ModloaderProcessor::EffectPrintKind::Pcf, machine))
+                      + owner.proc.formatEffectPrint (ModloaderProcessor::EffectPrintKind::Pcf, machine));
+        };
         delay.copy.onClick = [this]
         {
-            copyText (delayRecallText (owner.proc.songEffects(), machine));
+            copyText (delayRecallText (owner.proc.songEffects(), machine,
+                                      owner.proc.effectSnapshotEnable (
+                                          ModloaderProcessor::EffectPrintKind::Delay, machine))
+                      + owner.proc.formatEffectPrint (ModloaderProcessor::EffectPrintKind::Delay, machine));
         };
 
         closeBtn.setButtonText (juce::String::fromUTF8 ("\xc3\x97"));
@@ -1097,12 +1163,35 @@ public:
                                "and paste it into the matching OpenRB plugin.",
                          juce::dontSendNotification);
 
+        auto fromBarNote = [this] (ModloaderProcessor::EffectPrintKind kind) -> juce::String
+        {
+            const int bar = owner.proc.effectStartBar (kind, machine);
+            if (bar <= 1)
+                return {};
+            return "from bar " + juce::String (bar);
+        };
+        auto setTitle = [] (Row& row, juce::String name, juce::String later)
+        {
+            if (later.isNotEmpty())
+                name += "  " + later;
+            row.title.setText (name, juce::dontSendNotification);
+        };
+
         dist.visible = songDistOn (s, machine);
+        setTitle (dist, "Distortion", fromBarNote (ModloaderProcessor::EffectPrintKind::Distortion));
         dist.summary.setText ("amount " + juce::String ((int) s.dist_amount)
                                   + "    shape " + juce::String ((int) s.dist_shape),
                               juce::dontSendNotification);
 
         pcf.visible = songPcfOn (s, machine);
+        juce::String pcfLater = fromBarNote (ModloaderProcessor::EffectPrintKind::Pcf);
+        if (pcfLater.isNotEmpty())
+        {
+            const int other = machine == 0 ? 1 : 0;
+            if (owner.proc.effectStartBar (ModloaderProcessor::EffectPrintKind::Pcf, other) == 1)
+                pcfLater += machine == 0 ? " (moves from 909)" : " (moves from 808)";
+        }
+        setTitle (pcf, "PCF", pcfLater);
         pcf.summary.setText ("freq " + juce::String ((int) s.pcf_frequency)
                                  + "    res " + juce::String ((int) s.pcf_resonance)
                                  + "    amt " + juce::String ((int) s.pcf_amount)
@@ -1112,6 +1201,7 @@ public:
                              juce::dontSendNotification);
 
         delay.visible = songDelayOn (s, machine);
+        setTitle (delay, "Delay", fromBarNote (ModloaderProcessor::EffectPrintKind::Delay));
         delay.summary.setText ("mix " + juce::String ((int) delaySendOf (s, machine))
                                    + "    steps " + juce::String ((int) s.delay_steps)
                                    + "    mode " + juce::String (s.delay_mode == 0 ? "triplet" : "sixteenth")
@@ -1388,10 +1478,28 @@ void ModloaderLookAndFeel::drawRotarySlider (juce::Graphics& g, int x, int y, in
     g.drawEllipse (centre.x - radius, centre.y - radius, radius * 2.0f, radius * 2.0f, 1.2f);
 
     const float arcInset = width <= 22 ? 1.2f : 2.5f;
+    const bool bipolar = (bool) slider.getProperties()["bipolar"];
     juce::Path arc;
-    arc.addCentredArc (centre.x, centre.y, radius - arcInset, radius - arcInset, 0.0f, rotaryStartAngle, angle, true);
-    g.setColour (red ? kRed : kAmber);
-    g.strokePath (arc, juce::PathStrokeType (width <= 22 ? 1.5f : 2.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+    if (bipolar)
+    {
+        const float mid = 0.5f * (rotaryStartAngle + rotaryEndAngle);
+        if (std::abs (angle - mid) > 0.02f)
+        {
+            const float a0 = angle < mid ? angle : mid;
+            const float a1 = angle < mid ? mid : angle;
+            arc.addCentredArc (centre.x, centre.y, radius - arcInset, radius - arcInset, 0.0f, a0, a1, true);
+        }
+    }
+    else
+    {
+        arc.addCentredArc (centre.x, centre.y, radius - arcInset, radius - arcInset, 0.0f,
+                           rotaryStartAngle, angle, true);
+    }
+    if (! arc.isEmpty())
+    {
+        g.setColour (red ? kRed : kAmber);
+        g.strokePath (arc, juce::PathStrokeType (width <= 22 ? 1.5f : 2.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+    }
 
     juce::Path tick;
     tick.addRectangle (-1.0f, -radius + (width <= 22 ? 3.0f : 6.0f), 2.0f, radius * 0.4f);
@@ -1489,7 +1597,9 @@ void ModloaderLookAndFeel::drawToggleButton (juce::Graphics& g, juce::ToggleButt
     const auto fontSize = juce::jmin (15.0f, (float) button.getHeight() * 0.75f);
     const auto tickWidth = radio ? juce::jmin (11.0f, (float) button.getHeight() - 2.0f)
                                  : fontSize * 1.1f;
-    const float tickX = tickRight ? (float) button.getWidth() - tickWidth - 4.0f : 4.0f;
+    const bool noText = button.getButtonText().isEmpty();
+    const float tickX = noText ? ((float) button.getWidth() - tickWidth) * 0.5f
+                               : (tickRight ? (float) button.getWidth() - tickWidth - 4.0f : 4.0f);
     const float tickY = ((float) button.getHeight() - tickWidth) * 0.5f;
 
     if (radio)
@@ -1575,6 +1685,8 @@ ModloaderEditor::ModloaderEditor (ModloaderProcessor& p)
       shuffleA (p.apvts, "shuffle", shuffle),
       vol808A (p.apvts, "mix_808", vol808),
       vol909A (p.apvts, "mix_909", vol909),
+      pan808A (p.apvts, "pan_808", pan808),
+      pan909A (p.apvts, "pan_909", pan909),
       pat808 (p.apvts, ModloaderProcessor::p808Id (0)),
       pat909 (p.apvts, ModloaderProcessor::p909Id (0))
 {
@@ -1637,6 +1749,14 @@ ModloaderEditor::ModloaderEditor (ModloaderProcessor& p)
     setupFader (vol909);
     vol808.setTooltip ("808 Volume");
     vol909.setTooltip ("909 Volume");
+    setupKnob (pan808, false);
+    setupKnob (pan909, false);
+    pan808.getProperties().set ("bipolar", true);
+    pan909.getProperties().set ("bipolar", true);
+    pan808.setTooltip ("808 Pan");
+    pan909.setTooltip ("909 Pan");
+    setupCaptionLabel (pan808N, "PAN");
+    setupCaptionLabel (pan909N, "PAN");
     shuffleOn.setClickingTogglesState (true);
     shuffleOn.setButtonText ({});
     shuffleOn.setColour (juce::ToggleButton::textColourId, kMuted);
@@ -1665,9 +1785,11 @@ ModloaderEditor::ModloaderEditor (ModloaderProcessor& p)
     midiDrag.setMouseCursor (juce::MouseCursor::DraggingHandCursor);
     midiDrag.setRepaintsOnMouseActivity (true);
     addAndMakeVisible (midiDrag);
-    printBtn.setTooltip ("Arm, set the DAW to Latch or Write, play from bar 1 once, stop. Named "
-                         "808/909 lanes get the song's pattern changes and knob moves. Then switch "
-                         "to PATTERN so the DAW plays them.");
+    printBtn.setTooltip ("Arm, set the DAW to Latch or Write, play from bar 1 once, stop. Arming "
+                         "writes bar-1 values so the start of the take is recorded. Enable, "
+                         "Pattern, and Volume always get a lane. Pattern and Enable jump in the "
+                         "previous bar (pending until the downbeat); knobs ramp. Then switch to "
+                         "PATTERN so the DAW plays them.");
     printBtn.onClick = [this]
     {
         if (standaloneTransport)
@@ -1697,6 +1819,10 @@ ModloaderEditor::ModloaderEditor (ModloaderProcessor& p)
     setupTransport();
     setupDisable (disable808, 0);
     setupDisable (disable909, 1);
+    setupFxToggle (dist808On, dist808N, "DIST", 0, false);
+    setupFxToggle (pcf808On, pcf808N, "PCF", 0, true);
+    setupFxToggle (dist909On, dist909N, "DIST", 1, false);
+    setupFxToggle (pcf909On, pcf909N, "PCF", 1, true);
     addAndMakeVisible (fx808);
     addAndMakeVisible (fx909);
     fx808.setTooltip ("This song used effects on the 808");
@@ -1715,6 +1841,7 @@ ModloaderEditor::ModloaderEditor (ModloaderProcessor& p)
     refreshSongLabel();
     refreshSplash();
     refreshSteps();
+    refreshFxToggles();
     refreshFxBadges();
     if (auto* e = eng())
     {
@@ -1806,7 +1933,11 @@ void ModloaderEditor::setupPatternSection (int machine)
             const int index = section.shownBank * 8 + i;
             if (auto* param = proc.apvts.getParameter (machine == 0 ? ModloaderProcessor::p808Id (1)
                                                                      : ModloaderProcessor::p909Id (1)))
+            {
+                param->beginChangeGesture();
                 param->setValueNotifyingHost (param->convertTo0to1 ((float) index));
+                param->endChangeGesture();
+            }
             refreshPatternHeader();
             refreshSteps();
         };
@@ -2043,8 +2174,12 @@ void ModloaderEditor::setSongOpen (bool open)
     applyTransportVisibility();
     if (! standaloneTransport)
         setSize (kEditorW, open ? kEditorExpandedH : kEditorH);
+    if (! open)
+        resyncKnobsFromParams();
     refreshTransport();
     refreshPrint();
+    refreshPatternHeader();
+    refreshSteps();
 }
 
 void ModloaderEditor::applyTransportVisibility()
@@ -2105,6 +2240,29 @@ void ModloaderEditor::refreshTransport()
     tempoValue.setText (juce::String (t.tempo_bpm), juce::dontSendNotification);
 }
 
+void ModloaderEditor::resyncKnobsFromParams()
+{
+    auto setFrom = [this] (juce::Slider& s, const juce::String& id)
+    {
+        auto* p = proc.apvts.getParameter (id);
+        if (p == nullptr)
+            return;
+        s.setValue ((double) p->convertFrom0to1 (p->getValue()), juce::dontSendNotification);
+    };
+    for (int i = 2; i < ORB_MODLOADER_P808; ++i)
+    {
+        if (is808Switch (i))
+            continue;
+        setFrom (k808[(size_t) i], ModloaderProcessor::p808Id (i));
+    }
+    for (int i = 2; i < ORB_MODLOADER_P909; ++i)
+        setFrom (k909[(size_t) i], ModloaderProcessor::p909Id (i));
+    setFrom (vol808, "mix_808");
+    setFrom (vol909, "mix_909");
+    setFrom (pan808, "pan_808");
+    setFrom (pan909, "pan_909");
+}
+
 void ModloaderEditor::refreshSongKnobs()
 {
     auto* e = eng();
@@ -2130,6 +2288,10 @@ void ModloaderEditor::refreshSongKnobs()
         vol808.setValue ((double) live.mix808, juce::dontSendNotification);
     if (! vol909.isMouseButtonDown())
         vol909.setValue ((double) live.mix909, juce::dontSendNotification);
+    if (! pan808.isMouseButtonDown())
+        pan808.setValue ((double) live.mix808_pan, juce::dontSendNotification);
+    if (! pan909.isMouseButtonDown())
+        pan909.setValue ((double) live.mix909_pan, juce::dontSendNotification);
 }
 
 void ModloaderEditor::layoutTransport (juce::Rectangle<int> r)
@@ -2195,6 +2357,8 @@ void ModloaderEditor::setup808()
         if (i < 2 || is808Switch (i))
             continue;
         setupKnob (k808[(size_t) i], is808Level (i));
+        if (k808KnobLabel[i] != nullptr && std::strcmp (k808KnobLabel[i], "TUNE") == 0)
+            k808[(size_t) i].getProperties().set ("bipolar", true);
         k808A[(size_t) i] = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (
             proc.apvts, ModloaderProcessor::p808Id (i), k808[(size_t) i]);
         if (k808KnobLabel[i] != nullptr)
@@ -2246,6 +2410,8 @@ void ModloaderEditor::setup909()
     {
         setupKnob (k909[(size_t) i], i == 3 || i == 7 || i == 11 || i == 14 || i == 17 || i == 20
                                          || i == 21 || i == 22 || i == 25 || i == 27);
+        if (k909KnobLabel[i] != nullptr && std::strcmp (k909KnobLabel[i], "TUNE") == 0)
+            k909[(size_t) i].getProperties().set ("bipolar", true);
         k909A[(size_t) i] = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (
             proc.apvts, ModloaderProcessor::p909Id (i), k909[(size_t) i]);
         if (k909KnobLabel[i] != nullptr)
@@ -2277,9 +2443,7 @@ void ModloaderEditor::setup909()
 void ModloaderEditor::setupDisable (juce::ToggleButton& btn, int machine)
 {
     btn.setClickingTogglesState (true);
-    btn.setColour (juce::ToggleButton::textColourId, kMuted);
-    btn.getProperties().set ("tickRight", true);
-    btn.getProperties().set ("caption", true);
+    btn.setTooltip ("Mute this drum in the mix");
     addAndMakeVisible (btn);
     btn.onClick = [this, machine]
     {
@@ -2292,6 +2456,36 @@ void ModloaderEditor::setupDisable (juce::ToggleButton& btn, int machine)
             param->setValueNotifyingHost (button.getToggleState() ? 1.0f : 0.0f);
         repaint();
     };
+}
+
+void ModloaderEditor::setupFxToggle (juce::ToggleButton& btn, juce::Label& label,
+                                     const juce::String& text, int machine, bool pcf)
+{
+    setupCaptionLabel (label, text);
+    label.setBorderSize ({});
+    label.setMinimumHorizontalScale (1.0f);
+    btn.setClickingTogglesState (false);
+    btn.setButtonText ({});
+    btn.getProperties().set ("radio", true);
+    btn.setColour (juce::ToggleButton::textColourId, kMuted);
+    btn.setInterceptsMouseClicks (false, false);
+    btn.setTooltip (pcf ? "This song used PCF on this machine"
+                        : "This song used Distortion on this machine");
+    addAndMakeVisible (btn);
+    juce::ignoreUnused (machine);
+}
+
+void ModloaderEditor::refreshFxToggles()
+{
+    auto set = [] (juce::ToggleButton& btn, bool on)
+    {
+        btn.setToggleState (on, juce::dontSendNotification);
+    };
+    const auto& s = proc.songEffects();
+    set (dist808On, songDistOn (s, 0));
+    set (dist909On, songDistOn (s, 1));
+    set (pcf808On, songPcfOn (s, 0));
+    set (pcf909On, songPcfOn (s, 1));
 }
 
 void ModloaderEditor::select808 (int col)
@@ -2736,6 +2930,7 @@ void ModloaderEditor::finishSongLoad()
     refreshModLabel();
     refreshSplash();
     refreshDisable();
+    refreshFxToggles();
     sync808Radios();
     refreshFxBadges();
     if (auto* e = eng())
@@ -3100,6 +3295,7 @@ void ModloaderEditor::resetDevice()
     refreshSteps();
     refreshSongLabel();
     refreshDisable();
+    refreshFxToggles();
     sync808Radios();
     refreshFxBadges();
     hideEffectsRecall();
@@ -3303,6 +3499,7 @@ void ModloaderEditor::timerCallback()
     refreshSteps();
     refreshPatternHeader();
     refreshDisable();
+    refreshFxToggles();
     sync808Radios();
     refreshModLabel();
     refreshFxBadges();
@@ -3645,6 +3842,8 @@ void ModloaderEditor::resized()
                                        std::array<StepButton, 16>& steps,
                                        std::array<StepLed, 16>& leds,
                                        juce::ToggleButton& mute,
+                                       juce::Label& distN, juce::ToggleButton& distOn,
+                                       juce::Label& pcfN, juce::ToggleButton& pcfOn,
                                        std::array<juce::Rectangle<int>, 12>& slotRects,
                                        int y0, int contentBottom, bool is808)
     {
@@ -3667,16 +3866,32 @@ void ModloaderEditor::resized()
             }
             legends[(size_t) i].setBounds (lx, legendY, lw, legendH);
         }
+        int lastStepRight = kSlot0X;
         for (int i = 0; i < 16; ++i)
         {
             steps[(size_t) i].setBounds (kSlot0X + i * 46, stepY, 42, stepH);
             leds[(size_t) i].setBounds (kSlot0X + i * 46 + 17, ledY, 7, ledH);
+            lastStepRight = kSlot0X + i * 46 + 42;
         }
-        const int muteW = toggleContentWidth (mute, stepH);
-        // tickRight draws the box 4px inset from the button's right edge.
-        mute.setBounds (slotRects[11].getRight() + 4 - muteW, stepY, muteW, stepH);
+        constexpr int muteSize = 22;
+        mute.setBounds (lastStepRight + 16, stepY, muteSize, muteSize);
+
+        constexpr int radio = 12;
+        const int distW = juce::jmax (captionLabelWidth ("DIST") + 4, radio);
+        const int pcfW = juce::jmax (captionLabelWidth ("PCF") + 4, radio);
+        constexpr int fxGap = 8;
+        constexpr int fxLabelH = 12;
+        constexpr int afterMute = 8;
+        const int fxH = fxLabelH + radio;
+        const int fxY = stepY + (stepH - fxH) / 2 - 5;
+        const int groupX = mute.getRight() + afterMute + 2;
+        distN.setBounds (groupX, fxY, distW, fxLabelH);
+        distOn.setBounds (groupX + (distW - radio) / 2, fxY + fxLabelH, radio, radio);
+        pcfN.setBounds (groupX + distW + fxGap, fxY, pcfW, fxLabelH);
+        pcfOn.setBounds (groupX + distW + fxGap + (pcfW - radio) / 2, fxY + fxLabelH, radio, radio);
     };
-    placeSlotsAndSequencer (legend808, step808, led808, disable808, slot808,
+    placeSlotsAndSequencer (legend808, step808, led808, disable808,
+                            dist808N, dist808On, pcf808N, pcf808On, slot808,
                             y808, contentBottom808, true);
 
     auto place909Knob = [this, &placeLabeled] (int ctrl, int col, int row, SlotSide side)
@@ -3725,25 +3940,30 @@ void ModloaderEditor::resized()
     place909Knob (27, 11, 0, SlotSide::Centre);
     place909Knob (28, 11, 1, SlotSide::Centre);
 
-    placeSlotsAndSequencer (legend909, step909, led909, disable909, slot909,
+    placeSlotsAndSequencer (legend909, step909, led909, disable909,
+                            dist909N, dist909On, pcf909N, pcf909On, slot909,
                             y909, contentBottom909, false);
 
-    auto placeMixFader = [&] (juce::Slider& fader, const std::array<juce::Rectangle<int>, 12>& slots)
+    auto placeMixFader = [&] (juce::Slider& fader, juce::Slider& pan, juce::Label& panN,
+                              const std::array<juce::Rectangle<int>, 12>& slots)
     {
         const int availX = kSlot0X + k909SlotAreaW + 6;
         const int availW = machineRight - availX;
         const auto slot = slots[0];
-        fader.setBounds (availX, slot.getY(), availW, slot.getHeight());
+        const int faderH = (slot.getHeight() * 3) / 4;
+        fader.setBounds (availX + 3, slot.getY() - 5, availW, faderH);
+        const int panY = fader.getBottom() + 3;
+        panN.setBounds (availX, panY, availW, kLabelH);
+        pan.setBounds (availX + (availW - kKnobSize) / 2, panY + kLabelH, kKnobSize, kKnobSize);
     };
-    placeMixFader (vol808, slot808);
-    placeMixFader (vol909, slot909);
+    placeMixFader (vol808, pan808, pan808N, slot808);
+    placeMixFader (vol909, pan909, pan909N, slot909);
 
     auto placeFxBadge = [&] (FxBadgeButton& btn, const juce::Rectangle<int>& machine)
     {
-        const int availX = kSlot0X + k909SlotAreaW + 6;
-        const int availW = machineRight - availX;
         constexpr int size = 22;
-        const int x = availX + (availW - size) / 2;
+        constexpr int edge = 10;
+        const int x = machine.getRight() - edge - size;
         const int y = machine.getBottom() - 24 - size;
         btn.setBounds (x, y, size, size);
     };

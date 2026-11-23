@@ -68,7 +68,12 @@ public:
     void resetDevice();
 
     /// Copy the engine's live 808/909/mixer panel onto the host parameters.
+    /// Shuffle is GLOB, not a TRAK: the host knob is left as-is.
     void applyLivePanelParams();
+    /// Mixer DIST switch for 808 (0) or 909 (1). Independent per machine.
+    void setMachineDist (int machine, bool on);
+    /// Mixer PCF assignment. On assigns this machine and clears the other; off clears this machine.
+    void setMachinePcf (int machine, bool on);
     /// Load a ReBirth 2.x `.rbs`: 808/909 knobs and all patterns. Returns false on error.
     bool loadSongFile (const juce::File& file, juce::String& error);
     /// Write a 4.2 `.rbs` with the current 808/909 knobs and patterns.
@@ -80,13 +85,25 @@ public:
     /// Mod named in the last loaded song (GLOB), empty if none.
     juce::String loadedSongModName() const { return songModName; }
     /// Distortion / PCF / Delay snapshot from the last loaded song (zeros if none).
+    /// Tick-0 TRAKs overlay the mixer/device chunks so bar-1 values match playback.
+    /// 808/909 Enable, Pattern, and Volume use that same overlay (the chunk is the
+    /// pattern-mode copy).
     const OrbModloaderSong& songEffects() const { return songEffects_; }
-    /// True when that machine had Distortion, PCF, or Delay routing in the loaded song.
+    /// True when that machine had Distortion, PCF, or Delay routing in the loaded song
+    /// (chunk snapshot or TRAKs, including effects already on at tick 0).
     bool machineHasEffects (int machine) const;
+    /// Clipboard appendix for fx-modal Copy: `openrb-print 1` events when that effect's TRAKs move.
+    enum class EffectPrintKind { Distortion, Pcf, Delay };
+    juce::String formatEffectPrint (EffectPrintKind kind, int machine) const;
+    /// Tick-0 Enable for that Mix-chain instance (device on and routed).
+    int effectSnapshotEnable (EffectPrintKind kind, int machine) const;
+    /// 1-based bar where that effect is first routed to `machine`, 0 if unused.
+    int effectStartBar (EffectPrintKind kind, int machine) const;
     /// Load the scanned kit whose name matches `name` (case-insensitive). Returns the index, or -1.
     int loadModByName (const juce::String& name);
 
-    /// Arm or cancel a song-mode print take (808/909 TRAKs → host automation). Standalone is a no-op.
+    /// Arm or cancel a song-mode print take (808/909 TRAKs and mix faders → host automation).
+    /// Standalone is a no-op.
     bool setPrintArmed (bool on);
     bool isPrintArmed() const noexcept { return printArmed.load(); }
 
@@ -128,10 +145,23 @@ private:
     void runPrintTake (bool hostPlaying);
     void queuePrintValue (int index, uint8_t value);
     void chasePrintAt (int tick);
-    void emitPrintRange (int fromTick, int toTick);
+    void emitPrintRange (int fromTick, int toTick, bool latchesOnly = false);
+    void setPrintParam (int index, uint8_t value);
+    void beginPrintGesture (int index);
+    void endPrintGesture (int index);
+    void writePrintParam (int index, uint8_t value);
     juce::RangedAudioParameter* printParam (int index) const;
     static int printIndex (uint8_t machine, uint8_t ctrl);
     static bool printIsBool (int index);
+    static bool printIsStepped (int index);
+    static bool printLatchesAtBar (int index);
+    int printFireTick (int index, int tick) const;
+    static bool printAlwaysLane (int index);
+    static bool printLaneParts (int index, uint8_t& machine, uint8_t& ctrl);
+    static bool printLaneIsBarJumps (const std::vector<OrbModloaderTrackEvent>& events, int index);
+    bool printWritesJump (int index) const;
+    static bool printValueAt (const std::vector<OrbModloaderTrackEvent>& events,
+                              int index, int tick, uint8_t& value);
 
     std::unique_ptr<OrbModloader, EngineDeleter> engine_;
     std::atomic<float>* muteMain808 = nullptr;
@@ -157,10 +187,16 @@ private:
     bool haveLastSamples = false;
     juce::int64 lastSamples = 0;
 
-    static constexpr int kPrintParams = ORB_MODLOADER_P808 + ORB_MODLOADER_P909;
+    static constexpr int kPrintDrums = ORB_MODLOADER_P808 + ORB_MODLOADER_P909;
+    static constexpr int kPrintMix808 = kPrintDrums;
+    static constexpr int kPrintMix909 = kPrintDrums + 1;
+    static constexpr int kPrintMix808Pan = kPrintDrums + 2;
+    static constexpr int kPrintMix909Pan = kPrintDrums + 3;
+    static constexpr int kPrintParams = kPrintMix909Pan + 1;
     juce::SpinLock printLock;
     std::vector<OrbModloaderTrackEvent> printEvents;
     std::array<bool, kPrintParams> printMoving {};
+    std::array<bool, kPrintParams> printBarJumps {};
     std::array<uint8_t, kPrintParams> printPending {};
     std::array<bool, kPrintParams> printPendingOn {};
     std::array<bool, kPrintParams> printGesturing {};

@@ -71,7 +71,13 @@ and 909 devices are applied: all 32 patterns per machine, pattern lengths and sh
 flags, drum knobs, GLOB tempo/loop/song-mode, and the nine song tracks. 808 and 909
 pattern-select and knob automation play; 303/fx tracks are stored and written back but
 do not sound. The GLOB mod name is matched against the scanned kit list (item 0 is
-Standard ReBirth). Distortion, PCF, and Delay remain a recall snapshot.
+Standard ReBirth). Distortion, PCF, and Delay remain a recall snapshot. Copy in the
+effects modal still writes that snapshot (including `enabled: 0|1` for that Mix-chain
+instance), then an `openrb-print 1` appendix (`ppq: 192`, engine ticks, destination
+parameter ids). Enable is always in the appendix, including a tick-0 lane when it never
+moves later. Distortion and PCF Enable combine the device toggle with mixer routing so
+each Mix-chain instance matches ReBirth. Current OpenRB effects apply the snapshot knobs
+only; they do not yet consume Enable. The appendix is for a later Print paste.
 
 A song saved in song mode opens the 909 fold arrow. In a DAW that also opens the transport
 strip (Record, bar, loop start/length); the host drives play, stop, and locate. Closing the
@@ -82,15 +88,36 @@ edits the pattern bank. Right-click Edit can initialize the song or the current 
 pattern-mode state (with confirmation).
 
 The header control next to the MIDI drag handle **prints** 808/909 song-mode TRAKs into the
-DAW as named plugin-parameter automation (`808 Pattern`, `808 BD Decay`, and so on). Arm it,
-set the instrument track to Latch or Write (not Touch), play from bar 1 once, then stop.
-Only controllers that move after tick 0 are written. Turn Print off or stop the host to end
-the gestures. Then switch to **PATTERN** so the DAW owns playback; leaving song mode on
-lets TRAK chase fight the new lanes. Pattern-select lanes should be stepped/square, not
-linear ramps. Logic’s AU wrapper is the safer Logic path. Ableton Live is the host most
-likely to ignore plugin-originated gestures. Standalone has no Print control. Host loop
-off during the take; a looped pass rewrites the same points. 303, mixer, and effects
-TRAKs are not printed.
+DAW as named plugin-parameter automation (`808 Enable`, `808 Pattern`, `808 BD Decay`, and
+so on). Arm it, set the instrument track to Latch or Write (not Touch), set the **host
+tempo to 60 BPM**, play from bar 1 once, then stop. Print changes a parameter when the
+engine tick fires; the host stamps that edit at the playhead when the call arrives, a hop
+later. A slower clock leaves that hop enough wall-clock time to land on or before the hit
+instead of after it. 60 BPM is the usual starting point. A heavy session, a busy host, or
+many lanes printing at once (this instrument plus every OpenRB effect) can still miss. If
+the take is late or wrong, lower the host tempo and print again until it is clean, then
+restore the song tempo. Arming writes each printed lane's bar-1 (tick-0) value immediately so the
+opening of the song is recorded. The first playing block re-asserts those
+tick-0 values and only looks back a half bar for Enable/Pattern; sample
+switches are not flushed onto bar 1. Enable, Pattern, Volume, and Pan always get a lane, even
+when they only exist at tick 0 (808 on from bar 1, mix sitting at a static level or centre
+pan). Other knobs get a lane only if they move after tick 0. Enable and Pattern are lists
+(On/Off, A1–D8);
+Print writes them as short jumps so the host can record Hold/stepped automation. Live-recorded
+knobs stay one gesture so they can ramp. Knobs that only move on bar lines (ReBirth
+step-record) are printed as jumps a 32nd before those bars so a late DAW stamp still precedes
+the downbeat; the host records Hold, not a ramp across the previous bar. Enable and Pattern
+latch on the downbeat, so Print writes those jumps halfway through the previous bar (the
+pending window). 808 LT/LC, MT/MC, HT/HC, RS/CL, and CP/MA are read at the 16th-note hit, so
+a switch on a step is written a 32nd early; a switch on the odd 32nd stays on TRAK time (it
+belongs to the next 16th). Other knobs and fx-print ticks stay on the TRAK time. Turn Print
+off or stop the host to end remaining gestures.
+Then switch to **PATTERN** so the DAW owns playback; leaving song mode on lets TRAK chase
+fight the new lanes. If a Pattern lane still ramps, convert it to Hold/Step/Jump. Logic’s
+AU wrapper is the safer Logic path. Ableton Live is the host most likely to ignore
+plugin-originated gestures. Standalone has no Print control. Host loop off during the take;
+a looped pass rewrites the same points. 303, other mixer controllers, and effects TRAKs are
+not printed onto this instrument (effects Copy carries those for the OpenRB effect plugins).
 
 Save writes a canonical 4.2 `.rbs` that ReBirth 2.x can open. 808 and 909 knobs and
 patterns are the current panel. Tracks come from the sequencer. 303s stay as they were

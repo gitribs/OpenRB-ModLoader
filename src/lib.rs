@@ -48,8 +48,18 @@ pub const PATTERN_BYTES: usize = tr808::PATTERNS * tr808::PATTERN_LEN;
 pub const DEFAULT_MODS_DIR: &str = "/Library/Application Support/Propellerhead/Rebirth RB-338/Mods";
 /// Mixer controller for the 808 channel level (`5 + 6*2 + 1`).
 const MIX_808_LEVEL: u8 = 18;
+/// Mixer controller for the 808 channel pan (`5 + 6*2 + 2`).
+const MIX_808_PAN: u8 = 19;
 /// Mixer controller for the 909 channel level (`5 + 6*3 + 1`).
 const MIX_909_LEVEL: u8 = 24;
+/// Mixer controller for the 909 channel pan (`5 + 6*3 + 2`).
+const MIX_909_PAN: u8 = 25;
+/// Mixer controller for PCF assignment (0 off, 3 = 808, 4 = 909).
+const MIX_PCF_ID: u8 = 2;
+/// Mixer controller for the 808 distortion switch (`5 + 6*2 + 4`).
+const MIX_DIST_808: u8 = 21;
+/// Mixer controller for the 909 distortion switch (`5 + 6*3 + 4`).
+const MIX_DIST_909: u8 = 27;
 /// Ticks per bar.
 const BAR: i32 = orbsong::TICKS_PER_BAR as i32;
 /// Start of bar 999.
@@ -75,6 +85,16 @@ pub struct Params {
     pub direct_mix808: u8,
     /// Omit the 909 Mix from the main Output (5/6 still has it).
     pub direct_mix909: u8,
+    /// Mixer channel pan of the 808 (0..=127, default 64 centre).
+    pub mix808_pan: u8,
+    /// Mixer channel pan of the 909 (0..=127, default 64 centre).
+    pub mix909_pan: u8,
+    /// Mixer distortion switch of the 808 (0/1).
+    pub dist808: u8,
+    /// Mixer distortion switch of the 909 (0/1).
+    pub dist909: u8,
+    /// Mixer PCF assignment: 0 off, 3 = 808, 4 = 909.
+    pub pcf_id: u8,
 }
 
 impl Default for Params {
@@ -93,6 +113,11 @@ impl Default for Params {
             mix909: 100,
             direct_mix808: 0,
             direct_mix909: 0,
+            mix808_pan: 64,
+            mix909_pan: 64,
+            dist808: 0,
+            dist909: 0,
+            pcf_id: 0,
         }
     }
 }
@@ -128,7 +153,8 @@ impl From<PlayheadC> for Playhead {
     }
 }
 
-/// One 808/909 TRAK event for a DAW print take. `machine` is 0 808, 1 909.
+/// One TRAK event. `song_events` sets `machine` to 0 (808), 1 (909), or 2
+/// (mixer: ctrl 0/1 are 808/909 Volume, 2/3 are 808/909 Pan). `track_events` leaves it 0.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(C)]
 pub struct TrackEventC {
@@ -167,6 +193,30 @@ impl Default for Playhead {
 
 fn host_pos(ppq: f64, bpm: f64, k: usize) -> f64 {
     ppq * PPQ as f64 + (k as f64 + 1.0) * tempo_milli(bpm) as f64 * TEMPO_STEP
+}
+
+/// Pattern-relative clock used by the 808/909 step wrap test (`last_pos`).
+fn pattern_clock_pos(
+    song_mode: bool,
+    pat_start: i32,
+    patterns: &[u8],
+    cur_pattern: u8,
+    tick: i32,
+    shuffled: i32,
+) -> Option<i32> {
+    let o = cur_pattern as usize * tr808::PATTERN_LEN;
+    let shuffle = *patterns.get(o)?;
+    let len = patterns.get(o + 1).copied().unwrap_or(0) as u32;
+    if len == 0 {
+        return None;
+    }
+    let t = if shuffle != 0 { shuffled } else { tick };
+    let base = if song_mode { pat_start } else { 0 };
+    let period = 48u32.saturating_mul(len);
+    if period == 0 {
+        return None;
+    }
+    Some((t.wrapping_sub(base) as u32 % period) as i32)
 }
 
 fn block_inc(bpm: f64) -> f64 {
@@ -219,9 +269,14 @@ const MIX_KEEP: f64 = f64::from_bits(0x3FED_C28F_5C28_F5C3);
 const MIX_TAKE: f64 = f64::from_bits(0x3FB1_EB85_1EB8_51EC);
 const MIX_RAMP: f64 = f64::from_bits(0x3FA0_0000_0000_0000);
 
-fn mixer_target(level: u8, curve: &[f32; 128]) -> f32 {
-    let i = (level as usize).min(127);
-    (GUARD as f64 + curve[i] as f64) as f32
+fn mix_pan_targets(level: u8, pan: u8, pan_tab: &tables::PanTable) -> (f32, f32) {
+    let lev = (level as usize).min(127);
+    let p = (pan as usize).min(127);
+    let pg = pan_tab[lev][p];
+    (
+        (GUARD as f64 + pg[0] as f64) as f32,
+        (GUARD as f64 + pg[1] as f64) as f32,
+    )
 }
 
 fn copy_delay(dst: &mut [f32], src: &[f32; BLOCK], i: usize, fill: usize, take: usize) {
@@ -376,13 +431,19 @@ pub struct Modloader {
     last_params: Params,
     kept_song: Option<rbs::Song>,
     retired: Option<Retired>,
-    work_main: Block,
-    work_mix808: Block,
-    work_mix909: Block,
+    work_main_l: Block,
+    work_main_r: Block,
+    work_mix808_l: Block,
+    work_mix808_r: Block,
+    work_mix909_l: Block,
+    work_mix909_r: Block,
     work_aux: [Block; AUX],
-    delay_main: Block,
-    delay_mix808: Block,
-    delay_mix909: Block,
+    delay_main_l: Block,
+    delay_main_r: Block,
+    delay_mix808_l: Block,
+    delay_mix808_r: Block,
+    delay_mix909_l: Block,
+    delay_mix909_r: Block,
     delay_aux: [Block; AUX],
     fill: usize,
     pos: f64,
@@ -391,9 +452,11 @@ pub struct Modloader {
     held_tick: i32,
     last_tick: Option<i32>,
     blocks_processed: u64,
-    mix_level: [f32; 128],
-    gain_808: f32,
-    gain_909: f32,
+    mix_pan: Box<tables::PanTable>,
+    gain_808_l: f32,
+    gain_808_r: f32,
+    gain_909_l: f32,
+    gain_909_r: f32,
     mix_primed: bool,
     mods: Vec<ModEntry>,
     mods_dir: PathBuf,
@@ -405,8 +468,10 @@ pub struct Modloader {
     /// MIDI hits queued on the audio thread until the next 64-sample engine block.
     pending_midi: [(i32, u8, u8); 32],
     pending_midi_n: usize,
-    /// Host is printing 808/909 TRAKs to DAW automation; ignore those panel params.
+    /// Host is printing 808/909 TRAKs and mix faders to DAW automation; ignore those panel params.
     print_to_host: bool,
+    /// Next playing block should align drum `last_pos` so a mode switch does not retrigger.
+    align_drums: bool,
 }
 
 impl Default for Modloader {
@@ -424,7 +489,8 @@ impl Modloader {
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(DEFAULT_MODS_DIR));
         let mix_level = tables::level_curve();
-        let mix_gain = mixer_target(100, &mix_level);
+        let mix_pan = tables::pan_table(&mix_level);
+        let (mix_gain_l, mix_gain_r) = mix_pan_targets(100, 64, &mix_pan);
         let mut m = Self {
             tr808: tr808::Tr808::new(samples.clone(), process.clone()),
             tr909: tr909::Tr909::new(samples, process),
@@ -434,13 +500,19 @@ impl Modloader {
             last_params: Params::default(),
             kept_song: None,
             retired: None,
-            work_main: [0.0; BLOCK],
-            work_mix808: [0.0; BLOCK],
-            work_mix909: [0.0; BLOCK],
+            work_main_l: [0.0; BLOCK],
+            work_main_r: [0.0; BLOCK],
+            work_mix808_l: [0.0; BLOCK],
+            work_mix808_r: [0.0; BLOCK],
+            work_mix909_l: [0.0; BLOCK],
+            work_mix909_r: [0.0; BLOCK],
             work_aux: [[0.0; BLOCK]; AUX],
-            delay_main: [0.0; BLOCK],
-            delay_mix808: [0.0; BLOCK],
-            delay_mix909: [0.0; BLOCK],
+            delay_main_l: [0.0; BLOCK],
+            delay_main_r: [0.0; BLOCK],
+            delay_mix808_l: [0.0; BLOCK],
+            delay_mix808_r: [0.0; BLOCK],
+            delay_mix909_l: [0.0; BLOCK],
+            delay_mix909_r: [0.0; BLOCK],
             delay_aux: [[0.0; BLOCK]; AUX],
             fill: 0,
             pos: 0.0,
@@ -449,9 +521,11 @@ impl Modloader {
             held_tick: 0,
             last_tick: None,
             blocks_processed: 0,
-            mix_level,
-            gain_808: mix_gain,
-            gain_909: mix_gain,
+            mix_pan,
+            gain_808_l: mix_gain_l,
+            gain_808_r: mix_gain_r,
+            gain_909_l: mix_gain_l,
+            gain_909_r: mix_gain_r,
             mix_primed: false,
             mods: Vec::new(),
             mods_dir,
@@ -462,6 +536,7 @@ impl Modloader {
             pending_midi: [(0, 0, 0); 32],
             pending_midi_n: 0,
             print_to_host: false,
+            align_drums: false,
         };
         m.ensure_bound();
         m.init_device_tracks();
@@ -472,13 +547,19 @@ impl Modloader {
     /// Clear the output delay and clock. Patterns, the loaded kit, and the DAT path stay;
     /// hosts call this on bus connect and on prepareToPlay.
     pub fn reset(&mut self) {
-        self.work_main = [0.0; BLOCK];
-        self.work_mix808 = [0.0; BLOCK];
-        self.work_mix909 = [0.0; BLOCK];
+        self.work_main_l = [0.0; BLOCK];
+        self.work_main_r = [0.0; BLOCK];
+        self.work_mix808_l = [0.0; BLOCK];
+        self.work_mix808_r = [0.0; BLOCK];
+        self.work_mix909_l = [0.0; BLOCK];
+        self.work_mix909_r = [0.0; BLOCK];
         self.work_aux = [[0.0; BLOCK]; AUX];
-        self.delay_main = [0.0; BLOCK];
-        self.delay_mix808 = [0.0; BLOCK];
-        self.delay_mix909 = [0.0; BLOCK];
+        self.delay_main_l = [0.0; BLOCK];
+        self.delay_main_r = [0.0; BLOCK];
+        self.delay_mix808_l = [0.0; BLOCK];
+        self.delay_mix808_r = [0.0; BLOCK];
+        self.delay_mix909_l = [0.0; BLOCK];
+        self.delay_mix909_r = [0.0; BLOCK];
         self.delay_aux = [[0.0; BLOCK]; AUX];
         self.fill = 0;
         self.pending_midi_n = 0;
@@ -492,6 +573,48 @@ impl Modloader {
         self.last_ppq = None;
         self.held_tick = 0;
         self.last_tick = None;
+        self.align_drums = false;
+    }
+
+    /// Keep host playing/ppq so a mode switch is not treated as a transport start.
+    fn resync_clock_keep_transport(&mut self) {
+        self.last_ppq = None;
+        self.align_drums = true;
+    }
+
+    fn maybe_align_drums(&mut self, tick: i32, shuffle: u8, transport_start: bool) {
+        if !self.align_drums {
+            return;
+        }
+        self.align_drums = false;
+        if transport_start {
+            return;
+        }
+        let shuffled = seq::shuffled(tick, shuffle);
+        if let Some(v) = pattern_clock_pos(
+            self.tr808.song_mode,
+            self.tr808.pat_start,
+            self.tr808.patterns.as_ref(),
+            self.tr808.cur_pattern,
+            tick,
+            shuffled,
+        ) {
+            self.tr808.last_pos = v;
+            self.tr808.wrapped = false;
+            self.tr808.live[29] = ((v / 48) & 0xFF) as u8;
+        }
+        if let Some(v) = pattern_clock_pos(
+            self.tr909.song_mode,
+            self.tr909.pat_start,
+            self.tr909.patterns.as_ref(),
+            self.tr909.cur_pattern,
+            tick,
+            shuffled,
+        ) {
+            self.tr909.last_pos = v;
+            self.tr909.wrapped = false;
+            self.tr909.live[30] = ((v / 48) & 0xFF) as u8;
+        }
     }
 
     pub fn latency() -> usize {
@@ -511,7 +634,9 @@ impl Modloader {
         main_l: &mut [f32],
         main_r: &mut [f32],
         mix808: &mut [f32],
+        mix808_r: &mut [f32],
         mix909: &mut [f32],
+        mix909_r: &mut [f32],
         aux: &mut [&mut [f32]],
         params: Params,
         playhead: Playhead,
@@ -520,6 +645,7 @@ impl Modloader {
         let tempo = tempo_milli(playhead.bpm);
         let song_mode = self.song_mode();
         let host_song = song_mode && playhead.host_driven;
+        let transport_start = n > 0 && playhead.playing && !self.was_playing;
         let mode = if host_song {
             self.update_clock_mode(playhead, n)
         } else if song_mode {
@@ -532,10 +658,12 @@ impl Modloader {
 
         while i < n {
             let take = (n - i).min(BLOCK - self.fill);
-            main_l[i..i + take].copy_from_slice(&self.delay_main[self.fill..self.fill + take]);
-            main_r[i..i + take].copy_from_slice(&self.delay_main[self.fill..self.fill + take]);
-            copy_delay(mix808, &self.delay_mix808, i, self.fill, take);
-            copy_delay(mix909, &self.delay_mix909, i, self.fill, take);
+            main_l[i..i + take].copy_from_slice(&self.delay_main_l[self.fill..self.fill + take]);
+            main_r[i..i + take].copy_from_slice(&self.delay_main_r[self.fill..self.fill + take]);
+            copy_delay(mix808, &self.delay_mix808_l, i, self.fill, take);
+            copy_delay(mix808_r, &self.delay_mix808_r, i, self.fill, take);
+            copy_delay(mix909, &self.delay_mix909_l, i, self.fill, take);
+            copy_delay(mix909_r, &self.delay_mix909_r, i, self.fill, take);
             for (ch, bus) in aux.iter_mut().enumerate().take(AUX) {
                 if i + take <= bus.len() {
                     bus[i..i + take]
@@ -552,7 +680,7 @@ impl Modloader {
                     self.seq.set_shuffle(params.shuffle);
                     self.apply_panel_song(&params);
                     if host_song {
-                        self.drive_song_host(playhead, k, mode);
+                        self.drive_song_host(playhead, k, mode, transport_start);
                     } else if self.seq.globals.play != 0 {
                         self.with_devices(|seq, dev| {
                             seq.tick(dev);
@@ -563,9 +691,14 @@ impl Modloader {
                 } else {
                     let tick = self.take_tick(playhead, k, mode);
                     self.apply_params(params);
-                    let shuffled = seq::shuffled(tick, params.shuffle);
-                    self.tr808.step(tick, shuffled, tempo as i32);
-                    self.tr909.step(tick, shuffled, tempo as i32);
+                    if mode != ClockMode::Hold {
+                        self.maybe_align_drums(tick, params.shuffle, transport_start);
+                        let shuffled = seq::shuffled(tick, params.shuffle);
+                        self.tr808.step(tick, shuffled, tempo as i32);
+                        self.tr909.step(tick, shuffled, tempo as i32);
+                    } else {
+                        self.align_drums = false;
+                    }
                     (tick, mode != ClockMode::Hold)
                 };
                 self.drain_midi();
@@ -593,30 +726,51 @@ impl Modloader {
                 } else {
                     params.mix909
                 };
-                let t808 = mixer_target(mix808_level, &self.mix_level);
-                let t909 = mixer_target(mix909_level, &self.mix_level);
+                let mix808_pan = if song_mode {
+                    self.devices.mixer.live.channels[2].pan
+                } else {
+                    params.mix808_pan
+                };
+                let mix909_pan = if song_mode {
+                    self.devices.mixer.live.channels[3].pan
+                } else {
+                    params.mix909_pan
+                };
+                let (t808_l, t808_r) = mix_pan_targets(mix808_level, mix808_pan, &self.mix_pan);
+                let (t909_l, t909_r) = mix_pan_targets(mix909_level, mix909_pan, &self.mix_pan);
                 if !self.mix_primed {
-                    self.gain_808 = t808;
-                    self.gain_909 = t909;
+                    self.gain_808_l = t808_l;
+                    self.gain_808_r = t808_r;
+                    self.gain_909_l = t909_l;
+                    self.gain_909_r = t909_r;
                     self.mix_primed = true;
                 }
-                let (g808, scaled808) = mix_channel(&mix808_sum, self.gain_808, t808);
-                let (g909, scaled909) = mix_channel(&mix909_sum, self.gain_909, t909);
-                self.gain_808 = g808;
-                self.gain_909 = g909;
+                let (g808_l, scaled808_l) = mix_channel(&mix808_sum, self.gain_808_l, t808_l);
+                let (g808_r, scaled808_r) = mix_channel(&mix808_sum, self.gain_808_r, t808_r);
+                let (g909_l, scaled909_l) = mix_channel(&mix909_sum, self.gain_909_l, t909_l);
+                let (g909_r, scaled909_r) = mix_channel(&mix909_sum, self.gain_909_r, t909_r);
+                self.gain_808_l = g808_l;
+                self.gain_808_r = g808_r;
+                self.gain_909_l = g909_l;
+                self.gain_909_r = g909_r;
 
                 if params.bypass == 0 {
                     for s in 0..BLOCK {
-                        self.work_main[s] = 0.0;
+                        self.work_main_l[s] = 0.0;
+                        self.work_main_r[s] = 0.0;
                         if params.direct_mix808 == 0 {
-                            self.work_main[s] += scaled808[s];
+                            self.work_main_l[s] += scaled808_l[s];
+                            self.work_main_r[s] += scaled808_r[s];
                         }
                         if params.direct_mix909 == 0 {
-                            self.work_main[s] += scaled909[s];
+                            self.work_main_l[s] += scaled909_l[s];
+                            self.work_main_r[s] += scaled909_r[s];
                         }
                     }
-                    self.work_mix808 = scaled808;
-                    self.work_mix909 = scaled909;
+                    self.work_mix808_l = scaled808_l;
+                    self.work_mix808_r = scaled808_r;
+                    self.work_mix909_l = scaled909_l;
+                    self.work_mix909_r = scaled909_r;
                     for (i, v) in v808.iter().enumerate() {
                         self.work_aux[i] = *v;
                     }
@@ -624,9 +778,12 @@ impl Modloader {
                         self.work_aux[tr808::VOICES + i] = *v;
                     }
                 } else {
-                    self.work_main = [0.0; BLOCK];
-                    self.work_mix808 = [0.0; BLOCK];
-                    self.work_mix909 = [0.0; BLOCK];
+                    self.work_main_l = [0.0; BLOCK];
+                    self.work_main_r = [0.0; BLOCK];
+                    self.work_mix808_l = [0.0; BLOCK];
+                    self.work_mix808_r = [0.0; BLOCK];
+                    self.work_mix909_l = [0.0; BLOCK];
+                    self.work_mix909_r = [0.0; BLOCK];
                     self.work_aux = [[0.0; BLOCK]; AUX];
                 }
 
@@ -634,9 +791,12 @@ impl Modloader {
                     self.held_tick = tick;
                 }
                 self.last_tick = Some(tick);
-                std::mem::swap(&mut self.work_main, &mut self.delay_main);
-                std::mem::swap(&mut self.work_mix808, &mut self.delay_mix808);
-                std::mem::swap(&mut self.work_mix909, &mut self.delay_mix909);
+                std::mem::swap(&mut self.work_main_l, &mut self.delay_main_l);
+                std::mem::swap(&mut self.work_main_r, &mut self.delay_main_r);
+                std::mem::swap(&mut self.work_mix808_l, &mut self.delay_mix808_l);
+                std::mem::swap(&mut self.work_mix808_r, &mut self.delay_mix808_r);
+                std::mem::swap(&mut self.work_mix909_l, &mut self.delay_mix909_l);
+                std::mem::swap(&mut self.work_mix909_r, &mut self.delay_mix909_r);
                 std::mem::swap(&mut self.work_aux, &mut self.delay_aux);
                 self.fill = 0;
                 self.blocks_processed += 1;
@@ -681,12 +841,19 @@ impl Modloader {
         mode
     }
 
-    fn drive_song_host(&mut self, playhead: Playhead, k: usize, mode: ClockMode) {
+    fn drive_song_host(
+        &mut self,
+        playhead: Playhead,
+        k: usize,
+        mode: ClockMode,
+        transport_start: bool,
+    ) {
         match mode {
             ClockMode::Hold => {
                 if k != 0 {
                     return;
                 }
+                self.align_drums = false;
                 self.with_devices(|seq, dev| {
                     if seq.globals.byte2 != 0 {
                         seq.set_record(0, dev);
@@ -703,6 +870,10 @@ impl Modloader {
                 self.with_devices(|seq, dev| {
                     seq.follow_host(pos, dev);
                     seq.play(dev);
+                });
+                let t = self.seq.tick_pos();
+                self.maybe_align_drums(t, self.seq.globals.shuffle, transport_start);
+                self.with_devices(|seq, dev| {
                     let t = seq.tick_pos();
                     let sp = seq::shuffled(t, seq.globals.shuffle);
                     let tempo = seq.globals.tempo as i32;
@@ -717,6 +888,10 @@ impl Modloader {
                     }
                     let pos = (seq.pos + inc).clamp(0.0, MAX_POS as f64);
                     seq.follow_host(pos, dev);
+                });
+                let t = self.seq.tick_pos();
+                self.maybe_align_drums(t, self.seq.globals.shuffle, transport_start);
+                self.with_devices(|seq, dev| {
                     let t = seq.tick_pos();
                     let sp = seq::shuffled(t, seq.globals.shuffle);
                     let tempo = seq.globals.tempo as i32;
@@ -747,29 +922,47 @@ impl Modloader {
         for (i, &v) in p.p909.iter().enumerate() {
             self.tr909.set_param(i as u8, v);
         }
+        // Pattern mode: the ON button is a host param. Latch it here so a mode switch or
+        // a click does not wait for the next bar line (`Tr808::step` only copies Enable then).
+        self.tr808.enabled = p.p808[tr808::ENABLED];
+        self.tr909.enabled = p.p909[tr909::ENABLED];
         self.last_params.p808 = p.p808;
         self.last_params.p909 = p.p909;
         self.last_params.mix808 = p.mix808;
         self.last_params.mix909 = p.mix909;
+        self.last_params.mix808_pan = p.mix808_pan;
+        self.last_params.mix909_pan = p.mix909_pan;
+        if p.dist808 != self.last_params.dist808 {
+            self.devices.mixer.set_param(MIX_DIST_808, p.dist808);
+        }
+        if p.dist909 != self.last_params.dist909 {
+            self.devices.mixer.set_param(MIX_DIST_909, p.dist909);
+        }
+        if p.pcf_id != self.last_params.pcf_id {
+            self.devices.mixer.set_param(MIX_PCF_ID, p.pcf_id);
+        }
+        self.last_params.dist808 = p.dist808;
+        self.last_params.dist909 = p.dist909;
+        self.last_params.pcf_id = p.pcf_id;
         self.last_params.shuffle = p.shuffle;
     }
 
     fn apply_panel_song(&mut self, p: &Params) {
-        if !self.print_to_host {
-            for i in 0..P808 {
-                if p.p808[i] != self.last_params.p808[i] {
-                    self.tr808.set_param(i as u8, p.p808[i]);
-                    self.seq.record_hook(Device::Tr808, i as u8, p.p808[i]);
-                }
+        if self.print_to_host {
+            self.last_params.shuffle = p.shuffle;
+            return;
+        }
+        for i in 0..P808 {
+            if p.p808[i] != self.last_params.p808[i] {
+                self.tr808.set_param(i as u8, p.p808[i]);
+                self.seq.record_hook(Device::Tr808, i as u8, p.p808[i]);
             }
-            for i in 0..P909 {
-                if p.p909[i] != self.last_params.p909[i] {
-                    self.tr909.set_param(i as u8, p.p909[i]);
-                    self.seq.record_hook(Device::Tr909, i as u8, p.p909[i]);
-                }
+        }
+        for i in 0..P909 {
+            if p.p909[i] != self.last_params.p909[i] {
+                self.tr909.set_param(i as u8, p.p909[i]);
+                self.seq.record_hook(Device::Tr909, i as u8, p.p909[i]);
             }
-            self.last_params.p808 = p.p808;
-            self.last_params.p909 = p.p909;
         }
         if p.mix808 != self.last_params.mix808 {
             self.devices.mixer.set_param(MIX_808_LEVEL, p.mix808);
@@ -779,8 +972,35 @@ impl Modloader {
             self.devices.mixer.set_param(MIX_909_LEVEL, p.mix909);
             self.seq.record_hook(Device::Mixer, MIX_909_LEVEL, p.mix909);
         }
+        if p.mix808_pan != self.last_params.mix808_pan {
+            self.devices.mixer.set_param(MIX_808_PAN, p.mix808_pan);
+            self.seq.record_hook(Device::Mixer, MIX_808_PAN, p.mix808_pan);
+        }
+        if p.mix909_pan != self.last_params.mix909_pan {
+            self.devices.mixer.set_param(MIX_909_PAN, p.mix909_pan);
+            self.seq.record_hook(Device::Mixer, MIX_909_PAN, p.mix909_pan);
+        }
+        if p.dist808 != self.last_params.dist808 {
+            self.devices.mixer.set_param(MIX_DIST_808, p.dist808);
+            self.seq.record_hook(Device::Mixer, MIX_DIST_808, p.dist808);
+        }
+        if p.dist909 != self.last_params.dist909 {
+            self.devices.mixer.set_param(MIX_DIST_909, p.dist909);
+            self.seq.record_hook(Device::Mixer, MIX_DIST_909, p.dist909);
+        }
+        if p.pcf_id != self.last_params.pcf_id {
+            self.devices.mixer.set_param(MIX_PCF_ID, p.pcf_id);
+            self.seq.record_hook(Device::Mixer, MIX_PCF_ID, p.pcf_id);
+        }
+        self.last_params.p808 = p.p808;
+        self.last_params.p909 = p.p909;
         self.last_params.mix808 = p.mix808;
         self.last_params.mix909 = p.mix909;
+        self.last_params.mix808_pan = p.mix808_pan;
+        self.last_params.mix909_pan = p.mix909_pan;
+        self.last_params.dist808 = p.dist808;
+        self.last_params.dist909 = p.dist909;
+        self.last_params.pcf_id = p.pcf_id;
         self.last_params.shuffle = p.shuffle;
     }
 
@@ -799,6 +1019,11 @@ impl Modloader {
         p.shuffle = self.seq.globals.shuffle;
         p.mix808 = self.devices.mixer.live.channels[2].level;
         p.mix909 = self.devices.mixer.live.channels[3].level;
+        p.mix808_pan = self.devices.mixer.live.channels[2].pan;
+        p.mix909_pan = self.devices.mixer.live.channels[3].pan;
+        p.dist808 = u8::from(self.devices.mixer.live.channels[2].dist != 0);
+        p.dist909 = u8::from(self.devices.mixer.live.channels[3].dist != 0);
+        p.pcf_id = self.devices.mixer.live.pcf_id;
         p
     }
 
@@ -825,12 +1050,43 @@ impl Modloader {
 
     fn init_device_tracks(&mut self) {
         self.ensure_bound();
-        SongDevice::init_track(&mut self.tr808, &mut self.seq.track_mut(Device::Tr808.id() as usize));
-        SongDevice::init_track(&mut self.tr909, &mut self.seq.track_mut(Device::Tr909.id() as usize));
+        SongDevice::init_track(
+            &mut self.tr808,
+            &mut self.seq.track_mut(Device::Tr808.id() as usize),
+        );
+        SongDevice::init_track(
+            &mut self.tr909,
+            &mut self.seq.track_mut(Device::Tr909.id() as usize),
+        );
         SongDevice::init_track(
             &mut self.devices.mixer,
             &mut self.seq.track_mut(Device::Mixer.id() as usize),
         );
+    }
+
+    /// `init_track` writes tick-0 from the pattern-mode copy. Load that copy from the file
+    /// (with tick-0 TRAK overlays already in `info`) so leftover Enable/Pattern/mix match bar 1
+    /// instead of device ctor defaults (909 Enable on, mix 100).
+    fn seed_pattern_copies(&mut self, file: &rbs::Song, info: &SongInfo) {
+        self.tr808.params[..P808].copy_from_slice(&info.p808);
+        for (c, &v) in info.p909.iter().enumerate() {
+            self.tr909.params[tr909::internal_index(c)] = v;
+        }
+        self.devices.mixer.pattern.master = file.mixer.master;
+        self.devices.mixer.pattern.comp_id = file.mixer.comp_id;
+        self.devices.mixer.pattern.pcf_id = file.mixer.pcf_id;
+        for (i, ch) in file.mixer.channels.iter().enumerate() {
+            let dst = &mut self.devices.mixer.pattern.channels[i];
+            dst.enabled = ch.enabled;
+            dst.level = ch.level;
+            dst.pan = ch.pan;
+            dst.send = ch.delay_send;
+            dst.dist = ch.dist;
+        }
+        self.devices.mixer.pattern.channels[2].level = info.mix808;
+        self.devices.mixer.pattern.channels[3].level = info.mix909;
+        self.devices.mixer.pattern.channels[2].pan = info.mix808_pan;
+        self.devices.mixer.pattern.channels[3].pan = info.mix909_pan;
     }
 
     fn install_song(
@@ -844,6 +1100,7 @@ impl Modloader {
         self.seq = Sequencer::default();
         self.bound_at = 0;
         self.ensure_bound();
+        self.seed_pattern_copies(file, info);
         self.init_device_tracks();
         for (i, evs) in tracks.iter().enumerate() {
             if !evs.is_empty() {
@@ -861,16 +1118,23 @@ impl Modloader {
         self.seq.globals.shuffle = g.shuffle;
         self.devices.mixer.live.channels[2].level = info.mix808;
         self.devices.mixer.live.channels[3].level = info.mix909;
+        self.devices.mixer.live.channels[2].pan = info.mix808_pan;
+        self.devices.mixer.live.channels[3].pan = info.mix909_pan;
         self.last_params.p808 = info.p808;
         self.last_params.p909 = info.p909;
         self.last_params.mix808 = info.mix808;
         self.last_params.mix909 = info.mix909;
+        self.last_params.mix808_pan = info.mix808_pan;
+        self.last_params.mix909_pan = info.mix909_pan;
         self.last_params.shuffle = info.shuffle;
         let mode = g.song_mode;
         self.with_devices(|seq, dev| {
             seq.set_song_mode(mode, dev);
             seq.locate(0, dev);
         });
+        self.last_params.dist808 = u8::from(self.devices.mixer.live.channels[2].dist != 0);
+        self.last_params.dist909 = u8::from(self.devices.mixer.live.channels[3].dist != 0);
+        self.last_params.pcf_id = self.devices.mixer.live.pcf_id;
         self.apply_params_live(&info.p808, &info.p909);
     }
 
@@ -922,7 +1186,7 @@ impl Modloader {
         let mode = u8::from(on);
         if self.seq.globals.song_mode == mode {
             if !on {
-                self.restart_clock();
+                self.resync_clock_keep_transport();
             }
             return;
         }
@@ -931,14 +1195,13 @@ impl Modloader {
                 seq.set_record(0, dev);
                 seq.set_song_mode(0, dev);
             });
-            self.restart_clock();
         } else {
             self.with_devices(|seq, dev| {
                 seq.set_song_mode(1, dev);
             });
-            // Next host callback Follows, so a DAW that was already playing locates and starts.
-            self.restart_clock();
         }
+        // Follow the host on the next callback without treating this as a play-edge.
+        self.resync_clock_keep_transport();
     }
 
     pub fn play(&mut self) {
@@ -971,7 +1234,8 @@ impl Modloader {
         self.with_devices(|seq, dev| {
             seq.set_record(0, dev);
             let pos = seq.tick_pos();
-            let t = (if forward { 10 * BAR } else { -10 * BAR } + BAR * (pos / BAR)).clamp(0, MAX_POS);
+            let t =
+                (if forward { 10 * BAR } else { -10 * BAR } + BAR * (pos / BAR)).clamp(0, MAX_POS);
             seq.locate(t, dev);
         });
     }
@@ -995,7 +1259,8 @@ impl Modloader {
             return;
         }
         let len = self.seq.globals.loop_end as i32 - self.seq.globals.loop_start as i32;
-        let start = BAR * ((self.seq.globals.loop_start as i32 + delta_bars * BAR).clamp(0, MAX_POS) / BAR);
+        let start =
+            BAR * ((self.seq.globals.loop_start as i32 + delta_bars * BAR).clamp(0, MAX_POS) / BAR);
         let end = (len + start).clamp(start + BAR, MAX_POS);
         self.seq.set_loop_start(start as u32);
         self.seq.set_loop_end(end as u32);
@@ -1007,7 +1272,8 @@ impl Modloader {
         }
         let start = self.seq.globals.loop_start as i32;
         let hi = (MAX_END - start).max(BAR);
-        let len = BAR * ((self.seq.globals.loop_end as i32 - start + delta_bars * BAR).clamp(BAR, hi) / BAR);
+        let len = BAR
+            * ((self.seq.globals.loop_end as i32 - start + delta_bars * BAR).clamp(BAR, hi) / BAR);
         self.seq.set_loop_end((start + len) as u32);
     }
 
@@ -1029,7 +1295,8 @@ impl Modloader {
         }
     }
 
-    /// 808 then 909 TRAK events (controller bytes in panel / RBS order).
+    /// 808 then 909 TRAK events (controller bytes in panel / RBS order), then mixer
+    /// 808/909 volume as `machine` 2, `ctrl` 0/1, pan as `ctrl` 2/3.
     pub fn song_events(&self) -> Vec<TrackEventC> {
         let mut out = Vec::new();
         for (machine, max) in [(0u8, P808), (1u8, P909)] {
@@ -1050,7 +1317,45 @@ impl Modloader {
                 }
             }
         }
+        for e in self.seq.events(Device::Mixer.id() as usize) {
+            let ctrl = match e.ctrl {
+                MIX_808_LEVEL => 0u8,
+                MIX_909_LEVEL => 1u8,
+                MIX_808_PAN => 2u8,
+                MIX_909_PAN => 3u8,
+                _ => continue,
+            };
+            out.push(TrackEventC {
+                tick: e.tick,
+                machine: 2,
+                ctrl,
+                value: e.value,
+                reserved: 0,
+            });
+        }
         out
+    }
+
+    /// Events of one ReBirth TRAK (`0` mixer … `8` compressor). `machine` is 0.
+    pub fn track_events(&self, track: i32) -> Vec<TrackEventC> {
+        if track < 0 {
+            return Vec::new();
+        }
+        let i = track as usize;
+        if i >= Device::ALL.len() {
+            return Vec::new();
+        }
+        self.seq
+            .events(i)
+            .iter()
+            .map(|e| TrackEventC {
+                tick: e.tick,
+                machine: 0,
+                ctrl: e.ctrl,
+                value: e.value,
+                reserved: 0,
+            })
+            .collect()
     }
 
     /// Replace song tracks with the pattern-mode snapshot. `loop_only` limits that to
@@ -1157,10 +1462,17 @@ impl Modloader {
     }
 
     fn sync_last_params_from_live(&mut self) {
-        self.last_params.p808.copy_from_slice(&self.tr808.live[..P808]);
+        self.last_params
+            .p808
+            .copy_from_slice(&self.tr808.live[..P808]);
         self.last_params.p909 = self.rbs_909_live();
         self.last_params.mix808 = self.devices.mixer.live.channels[2].level;
         self.last_params.mix909 = self.devices.mixer.live.channels[3].level;
+        self.last_params.mix808_pan = self.devices.mixer.live.channels[2].pan;
+        self.last_params.mix909_pan = self.devices.mixer.live.channels[3].pan;
+        self.last_params.dist808 = u8::from(self.devices.mixer.live.channels[2].dist != 0);
+        self.last_params.dist909 = u8::from(self.devices.mixer.live.channels[3].dist != 0);
+        self.last_params.pcf_id = self.devices.mixer.live.pcf_id;
         self.last_params.shuffle = self.seq.globals.shuffle;
     }
 
@@ -1199,6 +1511,11 @@ impl Modloader {
             (1, c) if (c as usize) < P909 => self.last_params.p909[c as usize] = value,
             (2, MIX_808_LEVEL) => self.last_params.mix808 = value,
             (2, MIX_909_LEVEL) => self.last_params.mix909 = value,
+            (2, MIX_808_PAN) => self.last_params.mix808_pan = value,
+            (2, MIX_909_PAN) => self.last_params.mix909_pan = value,
+            (2, MIX_DIST_808) => self.last_params.dist808 = u8::from(value != 0),
+            (2, MIX_DIST_909) => self.last_params.dist909 = u8::from(value != 0),
+            (2, MIX_PCF_ID) => self.last_params.pcf_id = value,
             _ => {}
         }
     }
@@ -1522,15 +1839,17 @@ pub extern "C" fn orb_modloader_latency() -> i32 {
 
 /// # Safety
 /// `m` is a pointer from [`orb_modloader_new`]. `main_l` and `main_r` each have `nframes`
-/// samples when `nframes > 0`. `mix808` and `mix909` are each `nframes`, or null to skip
-/// that machine mix. `aux` is 22 pointers, each `nframes`, or null to skip aux.
+/// samples when `nframes > 0`. Mix pointers are each `nframes`, or null to skip that channel.
+/// `aux` is 22 pointers, each `nframes`, or null to skip aux.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn orb_modloader_process(
     m: *mut Modloader,
     main_l: *mut f32,
     main_r: *mut f32,
     mix808: *mut f32,
+    mix808_r: *mut f32,
     mix909: *mut f32,
+    mix909_r: *mut f32,
     aux: *const *mut f32,
     nframes: i32,
     params: *const Params,
@@ -1545,17 +1864,29 @@ pub unsafe extern "C" fn orb_modloader_process(
     let n = nframes as usize;
     let main_l = unsafe { std::slice::from_raw_parts_mut(main_l, n) };
     let main_r = unsafe { std::slice::from_raw_parts_mut(main_r, n) };
-    let mut skip808: [f32; 0] = [];
-    let mut skip909: [f32; 0] = [];
+    let mut skip808_l: [f32; 0] = [];
+    let mut skip808_r: [f32; 0] = [];
+    let mut skip909_l: [f32; 0] = [];
+    let mut skip909_r: [f32; 0] = [];
     let mix808 = if mix808.is_null() {
-        skip808.as_mut_slice()
+        skip808_l.as_mut_slice()
     } else {
         unsafe { std::slice::from_raw_parts_mut(mix808, n) }
     };
+    let mix808_r = if mix808_r.is_null() {
+        skip808_r.as_mut_slice()
+    } else {
+        unsafe { std::slice::from_raw_parts_mut(mix808_r, n) }
+    };
     let mix909 = if mix909.is_null() {
-        skip909.as_mut_slice()
+        skip909_l.as_mut_slice()
     } else {
         unsafe { std::slice::from_raw_parts_mut(mix909, n) }
+    };
+    let mix909_r = if mix909_r.is_null() {
+        skip909_r.as_mut_slice()
+    } else {
+        unsafe { std::slice::from_raw_parts_mut(mix909_r, n) }
     };
     let params = unsafe { params.as_ref() }.copied().unwrap_or_default();
     let playhead = unsafe { playhead.as_ref() }
@@ -1565,7 +1896,17 @@ pub unsafe extern "C" fn orb_modloader_process(
 
     if aux.is_null() {
         let mut empty: [&mut [f32]; 0] = [];
-        p.process(main_l, main_r, mix808, mix909, &mut empty, params, playhead);
+        p.process(
+            main_l,
+            main_r,
+            mix808,
+            mix808_r,
+            mix909,
+            mix909_r,
+            &mut empty,
+            params,
+            playhead,
+        );
         return;
     }
     let ptrs = unsafe { std::slice::from_raw_parts(aux, AUX) };
@@ -1573,12 +1914,32 @@ pub unsafe extern "C" fn orb_modloader_process(
     for &ptr in ptrs {
         if ptr.is_null() {
             let mut empty: [&mut [f32]; 0] = [];
-            p.process(main_l, main_r, mix808, mix909, &mut empty, params, playhead);
+            p.process(
+                main_l,
+                main_r,
+                mix808,
+                mix808_r,
+                mix909,
+                mix909_r,
+                &mut empty,
+                params,
+                playhead,
+            );
             return;
         }
         aux_vec.push(unsafe { std::slice::from_raw_parts_mut(ptr, n) });
     }
-    p.process(main_l, main_r, mix808, mix909, &mut aux_vec, params, playhead);
+    p.process(
+        main_l,
+        main_r,
+        mix808,
+        mix808_r,
+        mix909,
+        mix909_r,
+        &mut aux_vec,
+        params,
+        playhead,
+    );
 }
 
 /// # Safety
@@ -1987,6 +2348,36 @@ pub unsafe extern "C" fn orb_modloader_copy_song_events(
         m,
         |p| {
             let events = p.song_events();
+            let n = events.len() as i32;
+            if buf.is_null() || max <= 0 {
+                return n;
+            }
+            let copy = events.len().min(max as usize);
+            unsafe {
+                std::ptr::copy_nonoverlapping(events.as_ptr(), buf, copy);
+            }
+            n
+        },
+        0,
+    )
+}
+
+/// Copy one TRAK's events (`track` is 0 mixer … 8 compressor). If `buf` is null or `max`
+/// is 0, returns the count.
+///
+/// # Safety
+/// `m` from [`orb_modloader_new`]. `buf` is null or has `max` elements.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn orb_modloader_copy_track_events(
+    m: *mut Modloader,
+    track: i32,
+    buf: *mut TrackEventC,
+    max: i32,
+) -> i32 {
+    with_ref(
+        m,
+        |p| {
+            let events = p.track_events(track);
             let n = events.len() as i32;
             if buf.is_null() || max <= 0 {
                 return n;

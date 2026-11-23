@@ -65,6 +65,15 @@ fn host_playing(ppq: f64) -> Playhead {
     }
 }
 
+fn host_stopped(ppq: f64) -> Playhead {
+    Playhead {
+        bpm: 120.0,
+        ppq,
+        playing: false,
+        host_driven: true,
+    }
+}
+
 fn run_all(
     m: &mut Modloader,
     params: Params,
@@ -74,19 +83,51 @@ fn run_all(
     let mut left = vec![0.0f32; n];
     let mut right = vec![0.0f32; n];
     let mut mix808 = vec![0.0f32; n];
+    let mut mix808_r = vec![0.0f32; n];
     let mut mix909 = vec![0.0f32; n];
+    let mut mix909_r = vec![0.0f32; n];
     let mut aux_store = vec![vec![0.0f32; n]; AUX];
     let mut aux_refs: Vec<&mut [f32]> = aux_store.iter_mut().map(|v| v.as_mut_slice()).collect();
     m.process(
         &mut left,
         &mut right,
         &mut mix808,
+        &mut mix808_r,
         &mut mix909,
+        &mut mix909_r,
         &mut aux_refs,
         params,
         playhead,
     );
     (left, mix808, mix909, aux_store)
+}
+
+fn run_stereo(
+    m: &mut Modloader,
+    params: Params,
+    playhead: Playhead,
+    n: usize,
+) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) {
+    let mut left = vec![0.0f32; n];
+    let mut right = vec![0.0f32; n];
+    let mut mix808_l = vec![0.0f32; n];
+    let mut mix808_r = vec![0.0f32; n];
+    let mut mix909_l = vec![0.0f32; n];
+    let mut mix909_r = vec![0.0f32; n];
+    let mut aux_store = vec![vec![0.0f32; n]; AUX];
+    let mut aux_refs: Vec<&mut [f32]> = aux_store.iter_mut().map(|v| v.as_mut_slice()).collect();
+    m.process(
+        &mut left,
+        &mut right,
+        &mut mix808_l,
+        &mut mix808_r,
+        &mut mix909_l,
+        &mut mix909_r,
+        &mut aux_refs,
+        params,
+        playhead,
+    );
+    (left, right, mix808_l, mix808_r)
 }
 
 fn run(
@@ -393,24 +434,30 @@ fn machine_direct_omits_909_from_main_keeps_mix() {
 
 #[test]
 fn params_c_layout() {
-    assert_eq!(std::mem::size_of::<Params>(), 87);
+    assert_eq!(std::mem::size_of::<Params>(), 92);
     assert_eq!(std::mem::offset_of!(Params, mix808), 83);
     assert_eq!(std::mem::offset_of!(Params, mix909), 84);
     assert_eq!(std::mem::offset_of!(Params, direct_mix808), 85);
     assert_eq!(std::mem::offset_of!(Params, direct_mix909), 86);
+    assert_eq!(std::mem::offset_of!(Params, mix808_pan), 87);
+    assert_eq!(std::mem::offset_of!(Params, mix909_pan), 88);
+    assert_eq!(std::mem::offset_of!(Params, dist808), 89);
+    assert_eq!(std::mem::offset_of!(Params, dist909), 90);
+    assert_eq!(std::mem::offset_of!(Params, pcf_id), 91);
 }
 
 #[test]
 fn song_info_c_layout() {
     use crate::song::SongInfo;
-    assert_eq!(std::mem::size_of::<SongInfo>(), 164);
-    assert_eq!(std::mem::offset_of!(SongInfo, dist_enabled), 127);
-    assert_eq!(std::mem::offset_of!(SongInfo, delay_send_909), 146);
-    assert_eq!(std::mem::offset_of!(SongInfo, song_mode), 147);
-    assert_eq!(std::mem::offset_of!(SongInfo, loop_on), 148);
-    assert_eq!(std::mem::offset_of!(SongInfo, tempo), 152);
-    assert_eq!(std::mem::offset_of!(SongInfo, loop_start), 156);
-    assert_eq!(std::mem::offset_of!(SongInfo, loop_end), 160);
+    assert_eq!(std::mem::size_of::<SongInfo>(), 168);
+    assert_eq!(std::mem::offset_of!(SongInfo, mix808_pan), 62);
+    assert_eq!(std::mem::offset_of!(SongInfo, dist_enabled), 129);
+    assert_eq!(std::mem::offset_of!(SongInfo, delay_send_909), 148);
+    assert_eq!(std::mem::offset_of!(SongInfo, song_mode), 149);
+    assert_eq!(std::mem::offset_of!(SongInfo, loop_on), 150);
+    assert_eq!(std::mem::offset_of!(SongInfo, tempo), 156);
+    assert_eq!(std::mem::offset_of!(SongInfo, loop_start), 160);
+    assert_eq!(std::mem::offset_of!(SongInfo, loop_end), 164);
 }
 
 /// Direct omits that instrument from the main sum; the aux bus still has it.
@@ -548,6 +595,8 @@ fn rbs_song_roundtrip_drums() {
     info.shuffle = 77;
     info.mix808 = 80;
     info.mix909 = 110;
+    info.mix808_pan = 20;
+    info.mix909_pan = 100;
     let name = b"Standard ReBirth";
     for (i, &b) in name.iter().enumerate() {
         info.mod_name[i] = b as i8;
@@ -559,6 +608,8 @@ fn rbs_song_roundtrip_drums() {
     assert_eq!(parsed.glob.mod_name, "Standard ReBirth");
     assert_eq!(parsed.mixer.channels[2].level, 80);
     assert_eq!(parsed.mixer.channels[3].level, 110);
+    assert_eq!(parsed.mixer.channels[2].pan, 20);
+    assert_eq!(parsed.mixer.channels[3].pan, 100);
     assert_eq!(
         parsed.tb303[0].params,
         orb_engine::tb303::DEFAULT_PARAMS[..9]
@@ -575,8 +626,11 @@ fn rbs_song_roundtrip_drums() {
     assert_eq!(got.p808[tr808::BD_LEVEL], 90);
     assert_eq!(got.p909[tr909::FLAM], 40);
     assert_eq!(got.shuffle, 77);
+    assert_eq!(loaded.live_params().shuffle, 77);
     assert_eq!(got.mix808, 80);
     assert_eq!(got.mix909, 110);
+    assert_eq!(got.mix808_pan, 20);
+    assert_eq!(got.mix909_pan, 100);
     let got_name = {
         let b = got.mod_name.map(|c| c as u8);
         let n = b.iter().position(|&c| c == 0).unwrap();
@@ -644,6 +698,165 @@ fn rbs_song_keeps_effect_snapshot() {
     assert_eq!(parsed.mixer.channels[2].level, 80);
 }
 
+/// MIXR/DIST/PCF chunks are the pattern copy; tick-0 TRAKs are the live start. Effects that
+/// are already on at bar 1 still belong in the fx modal.
+#[test]
+fn rbs_song_fx_snapshot_uses_tick0_traks() {
+    let mut file = rbs::Song::empty();
+    file.glob.song_mode = 1;
+    file.dist.values = vec![0, 10, 5];
+    file.pcf.values = vec![0, 1, 2, 3, 4, 5, 0];
+    file.tracks[0].events = vec![
+        rbs::Event {
+            pos: 0,
+            ctrl: 2,
+            value: 3,
+        },
+        rbs::Event {
+            pos: 0,
+            ctrl: 27,
+            value: 1,
+        },
+    ];
+    file.tracks[6].events = vec![
+        rbs::Event {
+            pos: 0,
+            ctrl: 0,
+            value: 1,
+        },
+        rbs::Event {
+            pos: 0,
+            ctrl: 1,
+            value: 48,
+        },
+        rbs::Event {
+            pos: 0,
+            ctrl: 2,
+            value: 20,
+        },
+    ];
+    file.tracks[7].events = vec![
+        rbs::Event {
+            pos: 0,
+            ctrl: 0,
+            value: 1,
+        },
+        rbs::Event {
+            pos: 0,
+            ctrl: 1,
+            value: 33,
+        },
+        rbs::Event {
+            pos: 0,
+            ctrl: 2,
+            value: 44,
+        },
+        rbs::Event {
+            pos: 0,
+            ctrl: 3,
+            value: 55,
+        },
+        rbs::Event {
+            pos: 0,
+            ctrl: 4,
+            value: 12,
+        },
+        rbs::Event {
+            pos: 0,
+            ctrl: 5,
+            value: 70,
+        },
+        rbs::Event {
+            pos: 0,
+            ctrl: 6,
+            value: 1,
+        },
+    ];
+
+    let bytes = file.write().expect("write rbs");
+    let mut m = Modloader::new();
+    let info = m.load_song(&bytes).expect("load rbs");
+    assert_eq!(info.pcf_enabled, 1);
+    assert_eq!(info.pcf_id, 3);
+    assert_eq!(info.pcf_frequency, 33);
+    assert_eq!(info.pcf_resonance, 44);
+    assert_eq!(info.pcf_amount, 55);
+    assert_eq!(info.reserved[0] & 1, 1, "808 used PCF at tick 0");
+    assert_eq!(info.dist_enabled, 1);
+    assert_eq!(info.dist_909, 1);
+    assert_eq!(info.dist_808, 0);
+    assert_eq!(info.dist_amount, 48);
+    assert_eq!(info.dist_shape, 20);
+}
+
+/// Routing that first appears after tick 0 still counts as used.
+#[test]
+fn rbs_song_fx_snapshot_keeps_later_trak_routing() {
+    let mut file = rbs::Song::empty();
+    file.glob.song_mode = 1;
+    file.tracks[0].events = vec![
+        rbs::Event {
+            pos: 32,
+            ctrl: 2,
+            value: 4,
+        },
+        rbs::Event {
+            pos: 32,
+            ctrl: 21,
+            value: 1,
+        },
+    ];
+    file.tracks[6].events = vec![rbs::Event {
+        pos: 32,
+        ctrl: 0,
+        value: 1,
+    }];
+    file.tracks[7].events = vec![rbs::Event {
+        pos: 32,
+        ctrl: 0,
+        value: 1,
+    }];
+
+    let bytes = file.write().expect("write rbs");
+    let mut m = Modloader::new();
+    let info = m.load_song(&bytes).expect("load rbs");
+    assert_eq!(info.dist_808, 1);
+    assert_eq!(info.dist_enabled, 1);
+    assert_eq!(info.pcf_enabled, 1);
+    assert_eq!(info.reserved[0] & 2, 2, "909 used PCF after bar 1");
+}
+
+/// PCF is one insert: 808 at bar 1, then 909 later, must show on both machines.
+#[test]
+fn rbs_song_pcf_switch_marks_both_machines() {
+    let mut file = rbs::Song::empty();
+    file.glob.song_mode = 1;
+    file.tracks[0].events = vec![
+        rbs::Event {
+            pos: 0,
+            ctrl: 2,
+            value: 3,
+        },
+        rbs::Event {
+            pos: 128,
+            ctrl: 2,
+            value: 4,
+        },
+    ];
+    file.tracks[7].events = vec![rbs::Event {
+        pos: 0,
+        ctrl: 0,
+        value: 1,
+    }];
+
+    let bytes = file.write().expect("write rbs");
+    let mut m = Modloader::new();
+    let info = m.load_song(&bytes).expect("load rbs");
+    assert_eq!(info.pcf_id, 3, "bar 1 is still the 808");
+    assert_eq!(info.reserved[0] & 1, 1, "808 used PCF");
+    assert_eq!(info.reserved[0] & 2, 2, "909 used PCF after the switch");
+}
+
 /// Files before 4.2 convert 808 tom tunings the way ReBirth 2.x does (`v/2 + 32`).
 #[test]
 fn rbs_4_1_converts_808_tom_tune() {
@@ -708,6 +921,141 @@ fn rbs_song_mode_tracks_roundtrip() {
     assert_eq!(m.get_step(0, 0, 1, tr808::BD as u8), 1);
 }
 
+/// Drum chunks are the pattern copy; tick-0 TRAKs are the live start (Enable/Pattern included).
+#[test]
+fn rbs_song_drum_snapshot_uses_tick0_traks() {
+    let mut file = rbs::Song::empty();
+    file.glob.song_mode = 1;
+    let mut chunk = crate::Params::default().p808.to_vec();
+    chunk[tr808::ENABLED] = 0;
+    chunk[tr808::PATTERN] = 0;
+    file.tr808.params = chunk;
+    file.tracks[3].events = vec![
+        rbs::Event {
+            pos: 0,
+            ctrl: 0,
+            value: 1,
+        },
+        rbs::Event {
+            pos: 0,
+            ctrl: 1,
+            value: 5,
+        },
+    ];
+    let bytes = file.write().expect("write rbs");
+    let mut m = Modloader::new();
+    let info = m.load_song(&bytes).expect("load rbs");
+    assert_eq!(info.p808[tr808::ENABLED], 1, "tick-0 Enable overlays the chunk");
+    assert_eq!(info.p808[tr808::PATTERN], 5, "tick-0 Pattern overlays the chunk");
+}
+
+/// Mixer chunk is the pattern copy; tick-0 MIXR TRAKs are the live 808/909 faders.
+#[test]
+fn rbs_song_mix_snapshot_uses_tick0_traks() {
+    let mut file = rbs::Song::empty();
+    file.glob.song_mode = 1;
+    file.mixer.channels[2].level = 0;
+    file.mixer.channels[3].level = 0;
+    file.tracks[0].events = vec![
+        rbs::Event {
+            pos: 0,
+            ctrl: 18,
+            value: 80,
+        },
+        rbs::Event {
+            pos: 0,
+            ctrl: 24,
+            value: 90,
+        },
+    ];
+    let bytes = file.write().expect("write rbs");
+    let mut m = Modloader::new();
+    let info = m.load_song(&bytes).expect("load rbs");
+    assert_eq!(info.mix808, 80, "tick-0 808 mix overlays the chunk");
+    assert_eq!(info.mix909, 90, "tick-0 909 mix overlays the chunk");
+    let evs = m.song_events();
+    assert!(
+        evs.iter()
+            .any(|e| e.machine == 2 && e.ctrl == 0 && e.value == 80 && e.tick == 0),
+        "print dump includes 808 Volume at tick 0"
+    );
+    assert!(
+        evs.iter()
+            .any(|e| e.machine == 2 && e.ctrl == 1 && e.value == 90 && e.tick == 0),
+        "print dump includes 909 Volume at tick 0"
+    );
+}
+
+/// Pattern mode uses the tick-0 Enable overlay, not the off pattern-mode chunk.
+#[test]
+fn pattern_mode_hears_808_from_tick0_enable() {
+    let mut file = rbs::Song::empty();
+    file.glob.song_mode = 1;
+    let mut chunk = crate::Params::default().p808.to_vec();
+    chunk[tr808::ENABLED] = 0;
+    file.tr808.params = chunk;
+    file.tracks[3].events = vec![rbs::Event {
+        pos: 0,
+        ctrl: 0,
+        value: 1,
+    }];
+    let bytes = file.write().expect("write rbs");
+    let mut m = Modloader::new();
+    let info = m.load_song(&bytes).expect("load rbs");
+    assert_eq!(info.p808[tr808::ENABLED], 1);
+    m.set_step(0, 0, 0, tr808::BD as u8, 1);
+    m.set_song_mode(false);
+
+    let mut params = Params::default();
+    params.p808 = info.p808;
+    params.p808[tr808::BD_LEVEL] = 127;
+    params.p808[tr808::ACCENT] = 127;
+    run(&mut m, params, host_stopped(0.0), 256);
+    let (_, mix808, _, _) = run_all(&mut m, params, host_playing(0.0), BLOCK * 4);
+    assert!(
+        energy(&mix808[BLOCK..]) > 0.0,
+        "pattern mode must play the 808 after a song whose Enable only exists at tick 0"
+    );
+}
+
+/// Pattern mode uses the tick-0 mixer overlay, not a zeroed pattern-mode 808 fader.
+#[test]
+fn pattern_mode_hears_808_from_tick0_mix() {
+    let mut file = rbs::Song::empty();
+    file.glob.song_mode = 1;
+    file.mixer.channels[2].level = 0;
+    file.tr808.params = crate::Params::default().p808.to_vec();
+    file.tracks[0].events = vec![rbs::Event {
+        pos: 0,
+        ctrl: 18,
+        value: 100,
+    }];
+    file.tracks[3].events = vec![rbs::Event {
+        pos: 0,
+        ctrl: 0,
+        value: 1,
+    }];
+    let bytes = file.write().expect("write rbs");
+    let mut m = Modloader::new();
+    let info = m.load_song(&bytes).expect("load rbs");
+    assert_eq!(info.mix808, 100);
+    m.set_step(0, 0, 0, tr808::BD as u8, 1);
+    m.set_song_mode(false);
+
+    let mut params = Params::default();
+    params.p808 = info.p808;
+    params.p808[tr808::ENABLED] = 1;
+    params.p808[tr808::BD_LEVEL] = 127;
+    params.p808[tr808::ACCENT] = 127;
+    params.mix808 = info.mix808;
+    run(&mut m, params, host_stopped(0.0), 256);
+    let (_, mix808, _, _) = run_all(&mut m, params, host_playing(0.0), BLOCK * 4);
+    assert!(
+        energy(&mix808[BLOCK..]) > 0.0,
+        "pattern mode must play the 808 after a song whose mix only exists at tick 0"
+    );
+}
+
 /// 808/909 TRAK dump for a DAW print take; pattern changes after tick 0 are included.
 #[test]
 fn copy_song_events_808_pattern_change() {
@@ -732,8 +1080,10 @@ fn copy_song_events_808_pattern_change() {
     m.load_song(&bytes).expect("load");
     let evs = m.song_events();
     assert!(
-        evs.iter()
-            .any(|e| e.machine == 0 && e.ctrl == 1 && e.value == 3 && e.tick == TICKS_PER_BAR as i32),
+        evs.iter().any(|e| e.machine == 0
+            && e.ctrl == 1
+            && e.value == 3
+            && e.tick == TICKS_PER_BAR as i32),
         "pattern change at bar 2 is in the dump"
     );
     assert!(
@@ -748,6 +1098,138 @@ fn copy_song_events_808_pattern_change() {
     );
 }
 
+/// Mixer and delay TRAK dumps keep a send change and a delay-parameter change.
+#[test]
+fn copy_track_events_delay_and_mixer_send() {
+    use orb_engine::song::TICKS_PER_BAR;
+    let mut file = rbs::Song::empty();
+    file.glob.song_mode = 1;
+    file.tr808.params = crate::Params::default().p808.to_vec();
+    file.tracks[0].events = vec![
+        rbs::Event {
+            pos: 0,
+            ctrl: 20,
+            value: 22,
+        },
+        rbs::Event {
+            pos: 32,
+            ctrl: 20,
+            value: 40,
+        },
+    ];
+    file.tracks[5].events = vec![
+        rbs::Event {
+            pos: 0,
+            ctrl: 3,
+            value: 80,
+        },
+        rbs::Event {
+            pos: 32,
+            ctrl: 3,
+            value: 90,
+        },
+    ];
+    let bytes = file.write().expect("write rbs");
+    let mut m = Modloader::new();
+    m.load_song(&bytes).expect("load");
+    let mix = m.track_events(0);
+    assert!(
+        mix.iter()
+            .any(|e| e.ctrl == 20 && e.value == 22 && e.tick == 0),
+        "tick-0 808 delay send is in the mixer dump"
+    );
+    assert!(
+        mix.iter()
+            .any(|e| e.ctrl == 20 && e.value == 40 && e.tick == TICKS_PER_BAR as i32),
+        "808 delay send change at bar 2 is in the mixer dump"
+    );
+    let delay = m.track_events(5);
+    assert!(
+        delay
+            .iter()
+            .any(|e| e.ctrl == 3 && e.value == 80 && e.tick == 0),
+        "tick-0 delay feedback is in the delay dump"
+    );
+    assert!(
+        delay
+            .iter()
+            .any(|e| e.ctrl == 3 && e.value == 90 && e.tick == TICKS_PER_BAR as i32),
+        "delay feedback change at bar 2 is in the delay dump"
+    );
+}
+
+/// Mixer pan TRAKs are in the print dump as machine 2, ctrl 2/3, including tick 0.
+#[test]
+fn copy_song_events_mixer_pan() {
+    use orb_engine::song::TICKS_PER_BAR;
+    let mut file = rbs::Song::empty();
+    file.glob.song_mode = 1;
+    file.tr808.params = crate::Params::default().p808.to_vec();
+    file.mixer.channels[2].pan = 20;
+    file.tracks[0].events = vec![
+        rbs::Event {
+            pos: 0,
+            ctrl: 19,
+            value: 20,
+        },
+        rbs::Event {
+            pos: 32,
+            ctrl: 19,
+            value: 100,
+        },
+    ];
+    let bytes = file.write().expect("write rbs");
+    let mut m = Modloader::new();
+    let info = m.load_song(&bytes).expect("load");
+    assert_eq!(info.mix808_pan, 20);
+    let evs = m.song_events();
+    assert!(
+        evs.iter()
+            .any(|e| e.machine == 2 && e.ctrl == 2 && e.value == 20 && e.tick == 0),
+        "tick-0 808 pan is in the dump"
+    );
+    assert!(
+        evs.iter().any(|e| e.machine == 2
+            && e.ctrl == 2
+            && e.value == 100
+            && e.tick == TICKS_PER_BAR as i32),
+        "808 pan change at bar 2 is in the dump"
+    );
+}
+
+/// Hard-left 808 pan puts Mix energy on L; hard-right on R.
+#[test]
+fn mix_pan_hard_left_and_right() {
+    let mut m = Modloader::new();
+    m.set_step(0, 0, 0, tr808::BD as u8, 1);
+    let n = BLOCK * 8;
+    let mut left = Params::default();
+    left.mix808_pan = 0;
+    left.mix909 = 0;
+    let (_, _, mix_l, mix_r) = run_stereo(&mut m, left, playing(0.0), n);
+    let e_l = energy(&mix_l[BLOCK..]);
+    let e_r = energy(&mix_r[BLOCK..]);
+    assert!(e_l > 0.0, "hard-left 808 Mix has left energy");
+    assert!(
+        e_r < e_l * 1.0e-3,
+        "hard-left 808 Mix is silent on the right (L {e_l}, R {e_r})"
+    );
+
+    let mut m = Modloader::new();
+    m.set_step(0, 0, 0, tr808::BD as u8, 1);
+    let mut right = Params::default();
+    right.mix808_pan = 127;
+    right.mix909 = 0;
+    let (_, _, mix_l, mix_r) = run_stereo(&mut m, right, playing(0.0), n);
+    let e_l = energy(&mix_l[BLOCK..]);
+    let e_r = energy(&mix_r[BLOCK..]);
+    assert!(e_r > 0.0, "hard-right 808 Mix has right energy");
+    assert!(
+        e_l < e_r * 1.0e-2,
+        "hard-right 808 Mix is quiet on the left (L {e_l}, R {e_r})"
+    );
+}
+
 /// Print-to-host ignores incoming 808/909 panel values so DAW write-back cannot fight TRAKs.
 #[test]
 fn print_to_host_ignores_drum_panel() {
@@ -758,14 +1240,135 @@ fn print_to_host_ignores_drum_panel() {
     m.init_from_pattern(false);
     m.set_print(true);
     let before = m.live_params().p808[tr808::BD_LEVEL];
+    let before_mix = m.live_params().mix909;
     params.p808[tr808::BD_LEVEL] = 20;
+    params.mix909 = if before_mix == 0 { 100 } else { 0 };
     run_host(&mut m, params, 0.0, 4.0);
     assert_eq!(
         m.live_params().p808[tr808::BD_LEVEL],
         before,
         "print take does not apply host 808 knobs"
     );
+    assert_eq!(
+        m.live_params().mix909,
+        before_mix,
+        "print take does not apply host 909 Volume"
+    );
     m.set_print(false);
+}
+
+/// Tick-0 print dump is the song start (pattern copy + TRAKs), not device ctor defaults.
+#[test]
+fn print_dump_tick0_is_song_start_not_ctor_defaults() {
+    use orb_engine::song::TICKS_PER_BAR;
+    let mut file = rbs::Song::empty();
+    file.glob.song_mode = 1;
+    let mut p909 = crate::Params::default().p909.to_vec();
+    p909[tr909::ENABLED] = 0;
+    file.tr909.params = p909;
+    file.mixer.channels[3].level = 0;
+    file.tracks[4].events = vec![rbs::Event {
+        pos: 32,
+        ctrl: 0,
+        value: 1,
+    }];
+    let bytes = file.write().expect("write rbs");
+    let mut m = Modloader::new();
+    m.load_song(&bytes).expect("load");
+    let evs = m.song_events();
+    let tick0_enable = evs
+        .iter()
+        .filter(|e| e.machine == 1 && e.ctrl == tr909::ENABLED as u8 && e.tick == 0)
+        .map(|e| e.value)
+        .last();
+    assert_eq!(
+        tick0_enable,
+        Some(0),
+        "tick-0 909 Enable is the song start, not DEFAULT_PARAMS on"
+    );
+    let tick0_mix = evs
+        .iter()
+        .filter(|e| e.machine == 2 && e.ctrl == 1 && e.tick == 0)
+        .map(|e| e.value)
+        .last();
+    assert_eq!(
+        tick0_mix,
+        Some(0),
+        "tick-0 909 Volume is the song start, not ctor mix 100"
+    );
+    assert!(
+        evs.iter().any(|e| e.machine == 1
+            && e.ctrl == tr909::ENABLED as u8
+            && e.value == 1
+            && e.tick == TICKS_PER_BAR as i32),
+        "later 909 Enable is still in the dump"
+    );
+}
+
+/// 909 Enable can be on at bar 1 while mix is 0. Print must not open that fader from the panel.
+#[test]
+fn print_to_host_does_not_open_909_mix() {
+    use orb_engine::song::TICKS_PER_BAR;
+    let mut file = rbs::Song::empty();
+    file.glob.song_mode = 1;
+    file.tr909.params = crate::Params::default().p909.to_vec();
+    file.mixer.channels[3].level = 0;
+    file.tracks[4].events = vec![rbs::Event {
+        pos: 0,
+        ctrl: 0,
+        value: 1,
+    }];
+    file.tracks[0].events = vec![
+        rbs::Event {
+            pos: 0,
+            ctrl: 24,
+            value: 0,
+        },
+        rbs::Event {
+            pos: 32,
+            ctrl: 24,
+            value: 100,
+        },
+    ];
+    let bytes = file.write().expect("write rbs");
+    let load = || {
+        let mut m = Modloader::new();
+        m.load_song(&bytes).expect("load");
+        m.set_step(1, 0, 0, tr909::BD as u8, 1);
+        m
+    };
+    let mut params = Params::default();
+    params.p909[tr909::ENABLED] = 1;
+    params.p909[tr909::BD_LEVEL] = 127;
+    params.p909[tr909::ACCENT] = 127;
+    params.mix909 = 100;
+
+    let mut m = load();
+    assert!(m.song_mode(), "song stays in song mode after load");
+    assert_eq!(m.live_params().mix909, 0, "live 909 mix follows tick-0 TRAK");
+    assert_eq!(m.live_params().p909[tr909::ENABLED], 1);
+
+    m.set_print(true);
+    let (_, _, mix909, _) = run_all(&mut m, params, host_playing(0.0), BLOCK * 8);
+    let e_print = energy(&mix909[BLOCK..]);
+    assert_eq!(m.live_params().mix909, 0, "print take leaves 909 mix at the TRAK");
+
+    let bar2 = TICKS_PER_BAR as f64 / 192.0;
+    let (_, _, mix909, _) = run_all(&mut m, params, host_playing(bar2), BLOCK * 8);
+    let e_trak = energy(&mix909[BLOCK..]);
+    assert_eq!(m.live_params().mix909, 100, "bar 2 mix TRAK still reaches the mixer");
+    assert!(
+        e_trak > e_print * 1.0e3,
+        "909 plays when the song mix TRAK opens it (print {e_print}, trak {e_trak})"
+    );
+
+    let mut m = load();
+    let (_, _, mix909, _) = run_all(&mut m, params, host_playing(0.0), BLOCK * 8);
+    let e_panel = energy(&mix909[BLOCK..]);
+    assert!(
+        e_print < e_panel * 1.0e-3,
+        "print take must not open 909 Volume from the panel (print {e_print}, panel {e_panel})"
+    );
 }
 
 /// Record in song mode writes a pattern-select event; grid edits do not.
@@ -792,7 +1395,10 @@ fn song_record_pattern_not_grid() {
         "pattern button is recorded"
     );
     assert!(
-        !parsed.tracks[3].events.iter().any(|e| e.ctrl > 1 && e.value == 1),
+        !parsed.tracks[3]
+            .events
+            .iter()
+            .any(|e| e.ctrl > 1 && e.value == 1),
         "step grid is not a TRAK event"
     );
     assert_eq!(m.get_step(0, 5, 0, tr808::BD as u8), 1);
@@ -912,7 +1518,11 @@ fn song_mode_host_stop_ends_record_and_keeps_take() {
     );
 
     run_host(&mut m, params, 0.0, 2.0);
-    assert_eq!(m.live_params().p808[1], 0, "loop start plays the tick-0 pattern");
+    assert_eq!(
+        m.live_params().p808[1],
+        0,
+        "loop start plays the tick-0 pattern"
+    );
     run_host(&mut m, params, 2.0, 10.0);
     assert_eq!(
         m.live_params().p808[1],
@@ -1011,6 +1621,111 @@ fn rbs_invalid_file_keeps_patterns() {
     m.set_step(0, 0, 0, tr808::BD as u8, 1);
     assert!(m.load_song(&[0, 1, 2, 3, 4]).is_err());
     assert_eq!(m.get_step(0, 0, 0, tr808::BD as u8), 1);
+}
+
+/// Switching pattern/song while stopped must not fire step 0 (the wrap test on last_pos).
+#[test]
+fn mode_switch_while_stopped_does_not_trigger() {
+    let mut m = Modloader::new();
+    m.set_step(0, 0, 0, tr808::BD as u8, 1);
+    let mut params = Params::default();
+    params.p808[tr808::ENABLED] = 1;
+    params.p808[tr808::BD_LEVEL] = 127;
+    params.p808[tr808::ACCENT] = 127;
+
+    // Start past step 0 so the play-edge hit is an empty step.
+    run(&mut m, params, host_playing(2.0), 256);
+    run(&mut m, params, host_stopped(2.0), 256 * 4);
+
+    m.set_song_mode(true);
+    let (_, mix_on, _, _) = run_all(&mut m, params, host_stopped(2.0), 256 * 4);
+    m.set_song_mode(false);
+    let (_, mix_off, _, _) = run_all(&mut m, params, host_stopped(0.0), 256 * 4);
+    assert_eq!(
+        energy(&mix_on),
+        0.0,
+        "entering song mode while stopped must not hit step 0"
+    );
+    assert_eq!(
+        energy(&mix_off),
+        0.0,
+        "leaving song mode / rewind while stopped must not hit step 0"
+    );
+}
+
+/// A locate back to 0 while the host is stopped is not a play edge.
+#[test]
+fn stopped_rewind_does_not_trigger() {
+    let mut m = Modloader::new();
+    m.set_step(0, 0, 0, tr808::BD as u8, 1);
+    let mut params = Params::default();
+    params.p808[tr808::ENABLED] = 1;
+    params.p808[tr808::BD_LEVEL] = 127;
+    params.p808[tr808::ACCENT] = 127;
+
+    run(&mut m, params, host_playing(2.0), 256 * 4);
+    run(&mut m, params, host_stopped(2.0), 256 * 4);
+    let (_, mix, _, _) = run_all(&mut m, params, host_stopped(0.0), 256 * 4);
+    assert_eq!(
+        energy(&mix),
+        0.0,
+        "returning the playhead to 0 while stopped must not hit step 0"
+    );
+}
+
+/// Pattern/song while the host is already rolling must not wrap back to step 0.
+#[test]
+fn mode_switch_while_playing_does_not_retrigger_step0() {
+    let mut m = Modloader::new();
+    m.set_step(0, 0, 0, tr808::BD as u8, 1);
+    let mut params = Params::default();
+    params.p808[tr808::ENABLED] = 1;
+    params.p808[tr808::BD_LEVEL] = 127;
+    params.p808[tr808::ACCENT] = 127;
+
+    const BUF: usize = 256;
+    let q = BUF as f64 / ENGINE_RATE * 120.0 / 60.0;
+    let mut ppq = 2.0;
+    for _ in 0..8 {
+        run(&mut m, params, host_playing(ppq), BUF);
+        ppq += q;
+    }
+
+    m.set_song_mode(true);
+    let mut spike = 0.0f32;
+    for _ in 0..8 {
+        let (_, mix808, _, _) = run_all(&mut m, params, host_playing(ppq), BUF);
+        spike += energy(&mix808);
+        ppq += q;
+    }
+    m.set_song_mode(false);
+    for _ in 0..8 {
+        let (_, mix808, _, _) = run_all(&mut m, params, host_playing(ppq), BUF);
+        spike += energy(&mix808);
+        ppq += q;
+    }
+    assert_eq!(
+        spike, 0.0,
+        "mode switch while playing must not retrigger step 0"
+    );
+}
+
+/// Hitting play from a stop still fires the current step.
+#[test]
+fn play_from_stop_still_triggers_step0() {
+    let mut m = Modloader::new();
+    m.set_step(0, 0, 0, tr808::BD as u8, 1);
+    let mut params = Params::default();
+    params.p808[tr808::ENABLED] = 1;
+    params.p808[tr808::BD_LEVEL] = 127;
+    params.p808[tr808::ACCENT] = 127;
+
+    run(&mut m, params, host_stopped(0.0), 256);
+    let (_, mix808, _, _) = run_all(&mut m, params, host_playing(0.0), BLOCK * 4);
+    assert!(
+        energy(&mix808[BLOCK..]) > 0.0,
+        "a real play edge must still trigger step 0"
+    );
 }
 
 /// `RB20FUL.DAT` is read from an ISO in place, without extracting the file.

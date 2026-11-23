@@ -27,6 +27,11 @@ typedef struct OrbModloaderParams {
     uint8_t mix909;
     uint8_t direct_mix808;
     uint8_t direct_mix909;
+    uint8_t mix808_pan;
+    uint8_t mix909_pan;
+    uint8_t dist808;
+    uint8_t dist909;
+    uint8_t pcf_id;
 }
 #if defined(__GNUC__) || defined(__clang__)
 __attribute__ ((packed))
@@ -51,6 +56,8 @@ typedef struct OrbModloaderSong {
     uint8_t shuffle;
     uint8_t mix808;
     uint8_t mix909;
+    uint8_t mix808_pan;
+    uint8_t mix909_pan;
     char mod_name[ORB_MODLOADER_MOD_NAME];
     uint8_t dist_enabled;
     uint8_t dist_amount;
@@ -74,6 +81,7 @@ typedef struct OrbModloaderSong {
     uint8_t delay_send_909;
     uint8_t song_mode;
     uint8_t loop_on;
+    /// reserved[0]: bit 0 PCF used on 808, bit 1 on 909 (from TRAKs).
     uint8_t reserved[3];
     uint32_t tempo;
     uint32_t loop_start;
@@ -109,7 +117,9 @@ void orb_modloader_process(OrbModloader *m,
                            float *main_l,
                            float *main_r,
                            float *mix808,
+                           float *mix808_r,
                            float *mix909,
+                           float *mix909_r,
                            float *const *aux,
                            int32_t nframes,
                            const OrbModloaderParams *params,
@@ -154,6 +164,7 @@ void orb_modloader_set_loop_on(OrbModloader *m, int32_t on);
 void orb_modloader_set_record(OrbModloader *m, int32_t on);
 void orb_modloader_set_print(OrbModloader *m, int32_t on);
 int32_t orb_modloader_copy_song_events(OrbModloader *m, OrbModloaderTrackEvent *buf, int32_t max);
+int32_t orb_modloader_copy_track_events(OrbModloader *m, int32_t track, OrbModloaderTrackEvent *buf, int32_t max);
 void orb_modloader_init_from_pattern(OrbModloader *m, int32_t loop_only);
 void orb_modloader_set_tempo_bpm(OrbModloader *m, int32_t bpm);
 uint32_t orb_modloader_tempo_milli(OrbModloader *m);

@@ -45,12 +45,19 @@ public:
     void mouseUp (const juce::MouseEvent&) override;
 };
 
-class ModToggleButton final : public juce::ToggleButton
+class ModToggleButton : public juce::ToggleButton
 {
 public:
     using juce::ToggleButton::ToggleButton;
     void mouseDown (const juce::MouseEvent&) override;
     void mouseUp (const juce::MouseEvent&) override;
+};
+
+class MuteIconButton final : public ModToggleButton
+{
+public:
+    MuteIconButton();
+    void paintButton (juce::Graphics&, bool highlighted, bool down) override;
 };
 
 class StepButton final : public juce::TextButton
@@ -209,6 +216,9 @@ private:
     void showSplash();
     void hideSplash();
     void setupDisable (juce::ToggleButton& btn, int machine);
+    void setupFxToggle (juce::ToggleButton& btn, juce::Label& label, const juce::String& text,
+                        int machine, bool pcf);
+    void refreshFxToggles();
     void click808Step (int step);
     void click909Step (int step);
     void select808 (int col);
@@ -240,6 +250,7 @@ private:
     void applyTransportVisibility();
     void refreshTransport();
     void refreshSongKnobs();
+    void resyncKnobsFromParams();
     void layoutTransport (juce::Rectangle<int> r);
     void confirmInitFromPattern (bool loopOnly);
     void refreshFxBadges();
@@ -280,6 +291,9 @@ private:
     PrintLaneButton printBtn;
     ModSlider vol808, vol909;
     juce::AudioProcessorValueTreeState::SliderAttachment vol808A, vol909A;
+    ModSlider pan808, pan909;
+    juce::AudioProcessorValueTreeState::SliderAttachment pan808A, pan909A;
+    juce::Label pan808N, pan909N;
 
     struct PatternUi
     {
@@ -320,7 +334,9 @@ private:
     std::array<StepButton, 16> step909;
     std::array<StepLed, 16> led909;
     ModToggleButton flamEntry;
-    ModToggleButton disable808 { "MUTE" }, disable909 { "MUTE" };
+    MuteIconButton disable808, disable909;
+    juce::Label dist808N, pcf808N, dist909N, pcf909N;
+    ModToggleButton dist808On, pcf808On, dist909On, pcf909On;
     FxBadgeButton fx808, fx909;
     int sel909 = 1;
     int focusedMachine = -1;
