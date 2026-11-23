@@ -72,12 +72,12 @@ flags, drum knobs, GLOB tempo/loop/song-mode, and the nine song tracks. 808 and 
 pattern-select and knob automation play; 303/fx tracks are stored and written back but
 do not sound. The GLOB mod name is matched against the scanned kit list (item 0 is
 Standard ReBirth). Distortion, PCF, and Delay remain a recall snapshot. Copy in the
-effects modal still writes that snapshot (including `enabled: 0|1` for that Mix-chain
+effects modal writes that snapshot (including `enabled: 0|1` for that Mix-chain
 instance), then an `openrb-print 1` appendix (`ppq: 192`, engine ticks, destination
 parameter ids). Enable is always in the appendix, including a tick-0 lane when it never
 moves later. Distortion and PCF Enable combine the device toggle with mixer routing so
-each Mix-chain instance matches ReBirth. Current OpenRB effects apply the snapshot knobs
-only; they do not yet consume Enable. The appendix is for a later Print paste.
+each Mix-chain instance matches ReBirth. OpenRB Distortion, PCF, and Delay apply the
+snapshot knobs and Enable, and paste the appendix into Print.
 
 A song saved in song mode opens the 909 fold arrow. In a DAW that also opens the transport
 strip (Record, bar, loop start/length); the host drives play, stop, and locate. Closing the
