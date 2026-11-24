@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <vector>
 
 namespace
 {
@@ -2178,6 +2179,7 @@ void ModloaderEditor::setSongOpen (bool open)
         resyncKnobsFromParams();
     refreshTransport();
     refreshPrint();
+    refreshMidiDrag();
     refreshPatternHeader();
     refreshSteps();
 }
@@ -2654,10 +2656,14 @@ void ModloaderEditor::refreshMidiDrag()
 {
     const bool have = focusedMachine >= 0;
     midiDrag.setEnabled (have);
-    midiDrag.setTooltip (have
-        ? (focusedMachine == 0 ? "Drag 808 pattern to a sequencer track"
-                               : "Drag 909 pattern to a sequencer track")
-        : "Focus a machine, then drag its pattern to a sequencer track");
+    if (! have)
+        midiDrag.setTooltip ("Focus a machine, then drag its pattern to a sequencer track");
+    else if (songOpen)
+        midiDrag.setTooltip (focusedMachine == 0 ? "Drag 808 song to a sequencer track"
+                                                 : "Drag 909 song to a sequencer track");
+    else
+        midiDrag.setTooltip (focusedMachine == 0 ? "Drag 808 pattern to a sequencer track"
+                                                 : "Drag 909 pattern to a sequencer track");
 }
 
 void ModloaderEditor::refreshPrint()
@@ -2677,17 +2683,44 @@ void ModloaderEditor::startPatternMidiDrag()
 {
     if (focusedMachine < 0)
         return;
-    uint8_t pat[kPatLen];
-    if (! loadFocusedPattern (pat))
-        return;
     uint8_t shuffleAmount = 64;
     if (auto* v = proc.apvts.getRawParameterValue ("shuffle"))
         shuffleAmount = (uint8_t) juce::jlimit (0, 127, juce::roundToInt (v->load()));
     const auto name = focusedMachine == 0 ? "OpenRB-Modloader-808.mid"
                                           : "OpenRB-Modloader-909.mid";
     const auto file = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile (name);
-    if (! patternmidi::writeFile (file, focusedMachine, pat, shuffleAmount))
-        return;
+
+    if (songOpen)
+    {
+        auto* e = eng();
+        if (e == nullptr)
+            return;
+        uint8_t bank[ModloaderProcessor::kPatternBytes];
+        if (orb_modloader_get_patterns (e, focusedMachine, bank, ModloaderProcessor::kPatternBytes) <= 0)
+            return;
+        OrbModloaderTransport t {};
+        orb_modloader_transport (e, &t);
+        const int loopEndTick = juce::jmax (1, t.start - 1 + t.length) * patternmidi::kBarTicks;
+        if (loopEndTick <= 0)
+            return;
+        const int n = orb_modloader_copy_song_events (e, nullptr, 0);
+        if (n < 0)
+            return;
+        std::vector<OrbModloaderTrackEvent> events ((size_t) n);
+        if (n > 0 && orb_modloader_copy_song_events (e, events.data(), n) < 0)
+            return;
+        if (! patternmidi::writeSongFile (file, focusedMachine, bank, ModloaderProcessor::kPatternBytes,
+                                          events.data(), n, loopEndTick, shuffleAmount))
+            return;
+    }
+    else
+    {
+        uint8_t pat[kPatLen];
+        if (! loadFocusedPattern (pat))
+            return;
+        if (! patternmidi::writeFile (file, focusedMachine, pat, shuffleAmount))
+            return;
+    }
     performExternalDragDropOfFiles ({ file.getFullPathName() }, false);
 }
 

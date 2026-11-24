@@ -119,6 +119,11 @@ plugin-originated gestures. Standalone has no Print control. Host loop off durin
 a looped pass rewrites the same points. 303, other mixer controllers, and effects TRAKs are
 not printed onto this instrument (effects Copy carries those for the OpenRB effect plugins).
 
+In song mode the same MIDI handle is an instant drop, not a Print-style take: it writes the
+focused machine as notes from bar 1 through loop end (empty while Enable is off) and leaves
+knobs to Print. After the drop, turn Run off. If you use both, mute the Pattern lanes Print
+wrote so the MIDI clip owns the hits.
+
 Save writes a canonical 4.2 `.rbs` that ReBirth 2.x can open. 808 and 909 knobs and
 patterns are the current panel. Tracks come from the sequencer. 303s stay as they were
 in the last loaded file, or constructor defaults on a new song.

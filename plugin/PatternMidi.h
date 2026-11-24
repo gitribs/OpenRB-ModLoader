@@ -1,6 +1,7 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include "orb_modloader.h"
 
 #include <cstdint>
 #include <optional>
@@ -11,6 +12,8 @@ namespace patternmidi
 {
 constexpr int kPpq = 192;
 constexpr int kStepTicks = 48;
+constexpr int kBarTicks = 16 * kStepTicks;
+constexpr int kPatterns = 32;
 constexpr int kShufflePeriod = 96;
 constexpr int kShuffleDiv = 6;
 constexpr int kGateTicks = 24;
@@ -19,6 +22,8 @@ constexpr int kPatternLen = 194;
 constexpr int kDrumCols = 11;
 constexpr int k808BaseNote = 36;
 constexpr int k909BaseNote = 48;
+constexpr uint8_t kCtrlEnable = 0;
+constexpr uint8_t kCtrlPattern = 1;
 constexpr juce::uint8 kVelOn = 100;
 constexpr juce::uint8 kVelAccent = 127;
 /// 909 step value 1/3 with AC off. Double-click (2/4) and the AC column are independent
@@ -94,6 +99,30 @@ inline juce::uint8 velocityForStep (int machine, uint8_t value, bool accent) noe
     return accent ? kVelAccent : kVelOn;
 }
 
+inline void addHits (juce::MidiMessageSequence& seq, int machine, const uint8_t* row, int tick)
+{
+    const bool accent = row[0] != 0;
+
+    for (int col = 1; col <= kDrumCols; ++col)
+    {
+        const uint8_t value = row[col];
+        if (value == 0)
+            continue;
+
+        const int note = drumNote (machine, col);
+        const auto vel = velocityForStep (machine, value, accent);
+        seq.addEvent (juce::MidiMessage::noteOn (1, note, vel), (double) tick);
+        seq.addEvent (juce::MidiMessage::noteOff (1, note), (double) (tick + kGateTicks));
+
+        if (machine == 1 && value >= 3)
+        {
+            const int flamAt = tick + kFlamDelayTicks;
+            seq.addEvent (juce::MidiMessage::noteOn (1, note, vel), (double) flamAt);
+            seq.addEvent (juce::MidiMessage::noteOff (1, note), (double) (flamAt + kGateTicks));
+        }
+    }
+}
+
 inline juce::MidiFile fromPattern (int machine, const uint8_t* pat, uint8_t shuffleAmount)
 {
     juce::MidiMessageSequence seq;
@@ -107,28 +136,7 @@ inline juce::MidiFile fromPattern (int machine, const uint8_t* pat, uint8_t shuf
         int tick = step * kStepTicks;
         if (shuffleOn)
             tick = shuffledTick (tick, shuffleAmount);
-
-        const uint8_t* row = pat + 2 + 12 * step;
-        const bool accent = row[0] != 0;
-
-        for (int col = 1; col <= kDrumCols; ++col)
-        {
-            const uint8_t value = row[col];
-            if (value == 0)
-                continue;
-
-            const int note = drumNote (machine, col);
-            const auto vel = velocityForStep (machine, value, accent);
-            seq.addEvent (juce::MidiMessage::noteOn (1, note, vel), (double) tick);
-            seq.addEvent (juce::MidiMessage::noteOff (1, note), (double) (tick + kGateTicks));
-
-            if (machine == 1 && value >= 3)
-            {
-                const int flamAt = tick + kFlamDelayTicks;
-                seq.addEvent (juce::MidiMessage::noteOn (1, note, vel), (double) flamAt);
-                seq.addEvent (juce::MidiMessage::noteOff (1, note), (double) (flamAt + kGateTicks));
-            }
-        }
+        addHits (seq, machine, pat + 2 + 12 * step, tick);
     }
 
     seq.updateMatchedPairs();
@@ -138,9 +146,106 @@ inline juce::MidiFile fromPattern (int machine, const uint8_t* pat, uint8_t shuf
     return file;
 }
 
+inline void latchSongCtrls (const OrbModloaderTrackEvent* events, int eventCount,
+                            int machine, int throughTick,
+                            uint8_t& enable, uint8_t& pattern) noexcept
+{
+    if (events == nullptr || eventCount <= 0)
+        return;
+
+    for (int i = 0; i < eventCount; ++i)
+    {
+        const auto& e = events[i];
+        if (e.tick > throughTick || (int) e.machine != machine)
+            continue;
+        if (e.ctrl == kCtrlEnable)
+            enable = e.value != 0 ? 1 : 0;
+        else if (e.ctrl == kCtrlPattern)
+            pattern = (uint8_t) juce::jlimit (0, kPatterns - 1, (int) e.value);
+    }
+}
+
+/// Chase Enable (ctrl 0) and Pattern (ctrl 1) over `[0, loopEndTick)`. Enable-off 16ths
+/// emit nothing; Pattern still updates so the right slot is armed when Enable returns.
+inline juce::MidiFile fromSong (int machine,
+                                const uint8_t* bank,
+                                int bankBytes,
+                                const OrbModloaderTrackEvent* events,
+                                int eventCount,
+                                int loopEndTick,
+                                uint8_t shuffleAmount)
+{
+    juce::MidiMessageSequence seq;
+    seq.addEvent (juce::MidiMessage::textMetaEvent (3, machine == 0 ? "808" : "909"), 0.0);
+
+    uint8_t enable = 1;
+    uint8_t pattern = 0;
+    latchSongCtrls (events, eventCount, machine, 0, enable, pattern);
+    int patStart = 0;
+
+    for (int tick = 0; tick < loopEndTick; tick += kStepTicks)
+    {
+        if (tick % kBarTicks == 0)
+        {
+            uint8_t nextEnable = enable;
+            uint8_t nextPattern = pattern;
+            latchSongCtrls (events, eventCount, machine, tick, nextEnable, nextPattern);
+            if (nextPattern != pattern)
+            {
+                pattern = nextPattern;
+                patStart = tick;
+            }
+            enable = nextEnable;
+        }
+
+        if (enable == 0 || bank == nullptr || bankBytes < kPatterns * kPatternLen)
+            continue;
+
+        const int slot = juce::jlimit (0, kPatterns - 1, (int) pattern);
+        const uint8_t* pat = bank + slot * kPatternLen;
+        const int length = juce::jlimit (1, 16, (int) pat[1]);
+        const unsigned period = (unsigned) (kStepTicks * length);
+        const unsigned v = (unsigned) (tick - patStart) % period;
+        const int step = (int) (v / (unsigned) kStepTicks);
+        int at = tick;
+        if (pat[0] != 0)
+            at = shuffledTick (tick, shuffleAmount);
+        addHits (seq, machine, pat + 2 + 12 * step, at);
+    }
+
+    seq.updateMatchedPairs();
+    if (loopEndTick > 0)
+        seq.addEvent (juce::MidiMessage::endOfTrack(), (double) loopEndTick);
+
+    juce::MidiFile file;
+    file.setTicksPerQuarterNote (kPpq);
+    file.addTrack (seq);
+    return file;
+}
+
 inline bool writeFile (const juce::File& file, int machine, const uint8_t* pat, uint8_t shuffleAmount)
 {
     auto midi = fromPattern (machine, pat, shuffleAmount);
+    juce::FileOutputStream stream (file);
+    if (! stream.openedOk())
+        return false;
+    stream.setPosition (0);
+    stream.truncate();
+    return midi.writeTo (stream);
+}
+
+inline bool writeSongFile (const juce::File& file,
+                           int machine,
+                           const uint8_t* bank,
+                           int bankBytes,
+                           const OrbModloaderTrackEvent* events,
+                           int eventCount,
+                           int loopEndTick,
+                           uint8_t shuffleAmount)
+{
+    if (loopEndTick <= 0 || bank == nullptr || bankBytes < kPatterns * kPatternLen)
+        return false;
+    auto midi = fromSong (machine, bank, bankBytes, events, eventCount, loopEndTick, shuffleAmount);
     juce::FileOutputStream stream (file);
     if (! stream.openedOk())
         return false;
